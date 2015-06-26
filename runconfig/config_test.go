@@ -45,13 +45,6 @@ func TestParseRunLinks(t *testing.T) {
 	if _, hostConfig := mustParse(t, ""); len(hostConfig.Links) != 0 {
 		t.Fatalf("Error parsing links. No link expected, received: %v", hostConfig.Links)
 	}
-
-	if _, _, err := parse(t, "--link a"); err == nil {
-		t.Fatalf("Error parsing links. `--link a` should be an error but is not")
-	}
-	if _, _, err := parse(t, "--link"); err == nil {
-		t.Fatalf("Error parsing links. `--link` should be an error but is not")
-	}
 }
 
 func TestParseRunAttach(t *testing.T) {
@@ -104,7 +97,7 @@ func TestParseRunVolumes(t *testing.T) {
 	if config, hostConfig := mustParse(t, "-v /tmp -v /var"); hostConfig.Binds != nil {
 		t.Fatalf("Error parsing volume flags, `-v /tmp -v /var` should not mount-bind anything. Received %v", hostConfig.Binds)
 	} else if _, exists := config.Volumes["/tmp"]; !exists {
-		t.Fatalf("Error parsing volume flags, `-v /tmp` is missing from volumes. Recevied %v", config.Volumes)
+		t.Fatalf("Error parsing volume flags, `-v /tmp` is missing from volumes. Received %v", config.Volumes)
 	} else if _, exists := config.Volumes["/var"]; !exists {
 		t.Fatalf("Error parsing volume flags, `-v /var` is missing from volumes. Received %v", config.Volumes)
 	}
@@ -119,6 +112,14 @@ func TestParseRunVolumes(t *testing.T) {
 
 	if _, hostConfig := mustParse(t, "-v /hostTmp:/containerTmp:ro -v /hostVar:/containerVar:rw"); hostConfig.Binds == nil || compareRandomizedStrings(hostConfig.Binds[0], hostConfig.Binds[1], "/hostTmp:/containerTmp:ro", "/hostVar:/containerVar:rw") != nil {
 		t.Fatalf("Error parsing volume flags, `-v /hostTmp:/containerTmp:ro -v /hostVar:/containerVar:rw` should mount-bind /hostTmp into /containeTmp and /hostVar into /hostContainer. Received %v", hostConfig.Binds)
+	}
+
+	if _, hostConfig := mustParse(t, "-v /hostTmp:/containerTmp:roZ -v /hostVar:/containerVar:rwZ"); hostConfig.Binds == nil || compareRandomizedStrings(hostConfig.Binds[0], hostConfig.Binds[1], "/hostTmp:/containerTmp:roZ", "/hostVar:/containerVar:rwZ") != nil {
+		t.Fatalf("Error parsing volume flags, `-v /hostTmp:/containerTmp:roZ -v /hostVar:/containerVar:rwZ` should mount-bind /hostTmp into /containeTmp and /hostVar into /hostContainer. Received %v", hostConfig.Binds)
+	}
+
+	if _, hostConfig := mustParse(t, "-v /hostTmp:/containerTmp:Z -v /hostVar:/containerVar:z"); hostConfig.Binds == nil || compareRandomizedStrings(hostConfig.Binds[0], hostConfig.Binds[1], "/hostTmp:/containerTmp:Z", "/hostVar:/containerVar:z") != nil {
+		t.Fatalf("Error parsing volume flags, `-v /hostTmp:/containerTmp:Z -v /hostVar:/containerVar:z` should mount-bind /hostTmp into /containeTmp and /hostVar into /hostContainer. Received %v", hostConfig.Binds)
 	}
 
 	if config, hostConfig := mustParse(t, "-v /hostTmp:/containerTmp -v /containerVar"); hostConfig.Binds == nil || len(hostConfig.Binds) > 1 || hostConfig.Binds[0] != "/hostTmp:/containerTmp" {
@@ -166,25 +167,30 @@ func TestParseRunVolumes(t *testing.T) {
 func TestCompare(t *testing.T) {
 	volumes1 := make(map[string]struct{})
 	volumes1["/test1"] = struct{}{}
+	ports1 := make(nat.PortSet)
+	ports1[nat.Port("1111/tcp")] = struct{}{}
+	ports1[nat.Port("2222/tcp")] = struct{}{}
 	config1 := Config{
-		PortSpecs: []string{"1111:1111", "2222:2222"},
-		Env:       []string{"VAR1=1", "VAR2=2"},
-		Volumes:   volumes1,
+		ExposedPorts: ports1,
+		Env:          []string{"VAR1=1", "VAR2=2"},
+		Volumes:      volumes1,
 	}
+	ports3 := make(nat.PortSet)
+	ports3[nat.Port("0000/tcp")] = struct{}{}
+	ports3[nat.Port("2222/tcp")] = struct{}{}
 	config3 := Config{
-		PortSpecs: []string{"0000:0000", "2222:2222"},
-		Env:       []string{"VAR1=1", "VAR2=2"},
-		Volumes:   volumes1,
+		ExposedPorts: ports3,
+		Volumes:      volumes1,
 	}
 	volumes2 := make(map[string]struct{})
 	volumes2["/test2"] = struct{}{}
 	config5 := Config{
-		PortSpecs: []string{"0000:0000", "2222:2222"},
-		Env:       []string{"VAR1=1", "VAR2=2"},
-		Volumes:   volumes2,
+		Env:     []string{"VAR1=1", "VAR2=2"},
+		Volumes: volumes2,
 	}
+
 	if Compare(&config1, &config3) {
-		t.Fatalf("Compare should return false, PortSpecs are different")
+		t.Fatalf("Compare should return false, ExposedPorts are different")
 	}
 	if Compare(&config1, &config5) {
 		t.Fatalf("Compare should return false, Volumes are different")
@@ -198,18 +204,24 @@ func TestMerge(t *testing.T) {
 	volumesImage := make(map[string]struct{})
 	volumesImage["/test1"] = struct{}{}
 	volumesImage["/test2"] = struct{}{}
+	portsImage := make(nat.PortSet)
+	portsImage[nat.Port("1111/tcp")] = struct{}{}
+	portsImage[nat.Port("2222/tcp")] = struct{}{}
 	configImage := &Config{
-		PortSpecs: []string{"1111:1111", "2222:2222"},
-		Env:       []string{"VAR1=1", "VAR2=2"},
-		Volumes:   volumesImage,
+		ExposedPorts: portsImage,
+		Env:          []string{"VAR1=1", "VAR2=2"},
+		Volumes:      volumesImage,
 	}
 
+	portsUser := make(nat.PortSet)
+	portsUser[nat.Port("2222/tcp")] = struct{}{}
+	portsUser[nat.Port("3333/tcp")] = struct{}{}
 	volumesUser := make(map[string]struct{})
 	volumesUser["/test3"] = struct{}{}
 	configUser := &Config{
-		PortSpecs: []string{"3333:2222", "3333:3333"},
-		Env:       []string{"VAR2=3", "VAR3=3"},
-		Volumes:   volumesUser,
+		ExposedPorts: portsUser,
+		Env:          []string{"VAR2=3", "VAR3=3"},
+		Volumes:      volumesUser,
 	}
 
 	if err := Merge(configUser, configImage); err != nil {

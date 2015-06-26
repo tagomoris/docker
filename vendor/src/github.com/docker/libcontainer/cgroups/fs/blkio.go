@@ -1,3 +1,5 @@
+// +build linux
+
 package fs
 
 import (
@@ -31,6 +33,32 @@ func (s *BlkioGroup) Apply(d *data) error {
 func (s *BlkioGroup) Set(path string, cgroup *configs.Cgroup) error {
 	if cgroup.BlkioWeight != 0 {
 		if err := writeFile(path, "blkio.weight", strconv.FormatInt(cgroup.BlkioWeight, 10)); err != nil {
+			return err
+		}
+	}
+
+	if cgroup.BlkioWeightDevice != "" {
+		if err := writeFile(path, "blkio.weight_device", cgroup.BlkioWeightDevice); err != nil {
+			return err
+		}
+	}
+	if cgroup.BlkioThrottleReadBpsDevice != "" {
+		if err := writeFile(path, "blkio.throttle.read_bps_device", cgroup.BlkioThrottleReadBpsDevice); err != nil {
+			return err
+		}
+	}
+	if cgroup.BlkioThrottleWriteBpsDevice != "" {
+		if err := writeFile(path, "blkio.throttle.write_bps_device", cgroup.BlkioThrottleWriteBpsDevice); err != nil {
+			return err
+		}
+	}
+	if cgroup.BlkioThrottleReadIOpsDevice != "" {
+		if err := writeFile(path, "blkio.throttle.read_iops_device", cgroup.BlkioThrottleReadIOpsDevice); err != nil {
+			return err
+		}
+	}
+	if cgroup.BlkioThrottleWriteIOpsDevice != "" {
+		if err := writeFile(path, "blkio.throttle.write_iops_device", cgroup.BlkioThrottleWriteIOpsDevice); err != nil {
 			return err
 		}
 	}

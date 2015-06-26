@@ -53,7 +53,7 @@ func (daemon *Daemon) Containers(config *ContainersConfig) ([]*types.Container, 
 
 	if i, ok := psFilters["status"]; ok {
 		for _, value := range i {
-			if value == "exited" {
+			if value == "exited" || value == "created" {
 				all = true
 			}
 		}
@@ -151,6 +151,7 @@ func (daemon *Daemon) Containers(config *ContainersConfig) ([]*types.Container, 
 		}
 		newC.Created = int(container.Created.Unix())
 		newC.Status = container.State.String()
+		newC.HostConfig.NetworkMode = string(container.HostConfig().NetworkMode)
 
 		newC.Ports = []types.Port{}
 		for port, bindings := range container.NetworkSettings.Ports {

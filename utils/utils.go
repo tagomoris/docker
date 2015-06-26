@@ -7,18 +7,15 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/docker/docker/autogen/dockerversion"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/fileutils"
-	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/stringid"
 )
 
@@ -123,38 +120,6 @@ func DockerInitPath(localCopy string) string {
 	return ""
 }
 
-// FIXME: move to httputils? ioutils?
-type WriteFlusher struct {
-	sync.Mutex
-	w       io.Writer
-	flusher http.Flusher
-}
-
-func (wf *WriteFlusher) Write(b []byte) (n int, err error) {
-	wf.Lock()
-	defer wf.Unlock()
-	n, err = wf.w.Write(b)
-	wf.flusher.Flush()
-	return n, err
-}
-
-// Flush the stream immediately.
-func (wf *WriteFlusher) Flush() {
-	wf.Lock()
-	defer wf.Unlock()
-	wf.flusher.Flush()
-}
-
-func NewWriteFlusher(w io.Writer) *WriteFlusher {
-	var flusher http.Flusher
-	if f, ok := w.(http.Flusher); ok {
-		flusher = f
-	} else {
-		flusher = &ioutils.NopFlusher{}
-	}
-	return &WriteFlusher{w: w, flusher: flusher}
-}
-
 var globalTestID string
 
 // TestDirectory creates a new temporary directory and returns its path.
@@ -228,16 +193,6 @@ func ReplaceOrAppendEnvValues(defaults, overrides []string) []string {
 	}
 
 	return defaults
-}
-
-func DoesEnvExist(name string) bool {
-	for _, entry := range os.Environ() {
-		parts := strings.SplitN(entry, "=", 2)
-		if parts[0] == name {
-			return true
-		}
-	}
-	return false
 }
 
 // ValidateContextDirectory checks if all the contents of the directory

@@ -3,11 +3,13 @@ package registry
 import (
 	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/pkg/requestdecorator"
+	"github.com/docker/docker/cliconfig"
+	"github.com/docker/docker/pkg/transport"
 )
 
 var (
@@ -20,46 +22,35 @@ const (
 )
 
 func spawnTestRegistrySession(t *testing.T) *Session {
-	authConfig := &AuthConfig{}
-	endpoint, err := NewEndpoint(makeIndex("/v1/"))
+	authConfig := &cliconfig.AuthConfig{}
+	endpoint, err := NewEndpoint(makeIndex("/v1/"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := NewSession(authConfig, requestdecorator.NewRequestFactory(), endpoint, true)
+	var tr http.RoundTripper = debugTransport{NewTransport(ReceiveTimeout, endpoint.IsSecure), t.Log}
+	tr = transport.NewTransport(AuthTransport(tr, authConfig, false), DockerHeaders(nil)...)
+	client := HTTPClient(tr)
+	r, err := NewSession(client, authConfig, endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// In a normal scenario for the v1 registry, the client should send a `X-Docker-Token: true`
+	// header while authenticating, in order to retrieve a token that can be later used to
+	// perform authenticated actions.
+	//
+	// The mock v1 registry does not support that, (TODO(tiborvass): support it), instead,
+	// it will consider authenticated any request with the header `X-Docker-Token: fake-token`.
+	//
+	// Because we know that the client's transport is an `*authTransport` we simply cast it,
+	// in order to set the internal cached token to the fake token, and thus send that fake token
+	// upon every subsequent requests.
+	r.client.Transport.(*authTransport).token = token
 	return r
-}
-
-func TestPublicSession(t *testing.T) {
-	authConfig := &AuthConfig{}
-
-	getSessionDecorators := func(index *IndexInfo) int {
-		endpoint, err := NewEndpoint(index)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r, err := NewSession(authConfig, requestdecorator.NewRequestFactory(), endpoint, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return len(r.reqFactory.GetDecorators())
-	}
-
-	decorators := getSessionDecorators(makeIndex("/v1/"))
-	assertEqual(t, decorators, 0, "Expected no decorator on http session")
-
-	decorators = getSessionDecorators(makeHttpsIndex("/v1/"))
-	assertNotEqual(t, decorators, 0, "Expected decorator on https session")
-
-	decorators = getSessionDecorators(makePublicIndex())
-	assertEqual(t, decorators, 0, "Expected no decorator on public session")
 }
 
 func TestPingRegistryEndpoint(t *testing.T) {
 	testPing := func(index *IndexInfo, expectedStandalone bool, assertMessage string) {
-		ep, err := NewEndpoint(index)
+		ep, err := NewEndpoint(index, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +70,7 @@ func TestPingRegistryEndpoint(t *testing.T) {
 func TestEndpoint(t *testing.T) {
 	// Simple wrapper to fail test if err != nil
 	expandEndpoint := func(index *IndexInfo) *Endpoint {
-		endpoint, err := NewEndpoint(index)
+		endpoint, err := NewEndpoint(index, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +79,7 @@ func TestEndpoint(t *testing.T) {
 
 	assertInsecureIndex := func(index *IndexInfo) {
 		index.Secure = true
-		_, err := NewEndpoint(index)
+		_, err := NewEndpoint(index, nil)
 		assertNotEqual(t, err, nil, index.Name+": Expected error for insecure index")
 		assertEqual(t, strings.Contains(err.Error(), "insecure-registry"), true, index.Name+": Expected insecure-registry  error for insecure index")
 		index.Secure = false
@@ -96,7 +87,7 @@ func TestEndpoint(t *testing.T) {
 
 	assertSecureIndex := func(index *IndexInfo) {
 		index.Secure = true
-		_, err := NewEndpoint(index)
+		_, err := NewEndpoint(index, nil)
 		assertNotEqual(t, err, nil, index.Name+": Expected cert error for secure index")
 		assertEqual(t, strings.Contains(err.Error(), "certificate signed by unknown authority"), true, index.Name+": Expected cert error for secure index")
 		index.Secure = false
@@ -162,14 +153,14 @@ func TestEndpoint(t *testing.T) {
 	}
 	for _, address := range badEndpoints {
 		index.Name = address
-		_, err := NewEndpoint(index)
+		_, err := NewEndpoint(index, nil)
 		checkNotEqual(t, err, nil, "Expected error while expanding bad endpoint")
 	}
 }
 
 func TestGetRemoteHistory(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	hist, err := r.GetRemoteHistory(imageID, makeURL("/v1/"), token)
+	hist, err := r.GetRemoteHistory(imageID, makeURL("/v1/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,16 +172,16 @@ func TestGetRemoteHistory(t *testing.T) {
 
 func TestLookupRemoteImage(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	err := r.LookupRemoteImage(imageID, makeURL("/v1/"), token)
+	err := r.LookupRemoteImage(imageID, makeURL("/v1/"))
 	assertEqual(t, err, nil, "Expected error of remote lookup to nil")
-	if err := r.LookupRemoteImage("abcdef", makeURL("/v1/"), token); err == nil {
+	if err := r.LookupRemoteImage("abcdef", makeURL("/v1/")); err == nil {
 		t.Fatal("Expected error of remote lookup to not nil")
 	}
 }
 
 func TestGetRemoteImageJSON(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	json, size, err := r.GetRemoteImageJSON(imageID, makeURL("/v1/"), token)
+	json, size, err := r.GetRemoteImageJSON(imageID, makeURL("/v1/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +190,7 @@ func TestGetRemoteImageJSON(t *testing.T) {
 		t.Fatal("Expected non-empty json")
 	}
 
-	_, _, err = r.GetRemoteImageJSON("abcdef", makeURL("/v1/"), token)
+	_, _, err = r.GetRemoteImageJSON("abcdef", makeURL("/v1/"))
 	if err == nil {
 		t.Fatal("Expected image not found error")
 	}
@@ -207,7 +198,7 @@ func TestGetRemoteImageJSON(t *testing.T) {
 
 func TestGetRemoteImageLayer(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	data, err := r.GetRemoteImageLayer(imageID, makeURL("/v1/"), token, 0)
+	data, err := r.GetRemoteImageLayer(imageID, makeURL("/v1/"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,24 +206,39 @@ func TestGetRemoteImageLayer(t *testing.T) {
 		t.Fatal("Expected non-nil data result")
 	}
 
-	_, err = r.GetRemoteImageLayer("abcdef", makeURL("/v1/"), token, 0)
+	_, err = r.GetRemoteImageLayer("abcdef", makeURL("/v1/"), 0)
 	if err == nil {
 		t.Fatal("Expected image not found error")
 	}
 }
 
-func TestGetRemoteTags(t *testing.T) {
+func TestGetRemoteTag(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	tags, err := r.GetRemoteTags([]string{makeURL("/v1/")}, REPO, token)
+	tag, err := r.GetRemoteTag([]string{makeURL("/v1/")}, REPO, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEqual(t, len(tags), 1, "Expected one tag")
-	assertEqual(t, tags["latest"], imageID, "Expected tag latest to map to "+imageID)
+	assertEqual(t, tag, imageID, "Expected tag test to map to "+imageID)
 
-	_, err = r.GetRemoteTags([]string{makeURL("/v1/")}, "foo42/baz", token)
-	if err == nil {
-		t.Fatal("Expected error when fetching tags for bogus repo")
+	_, err = r.GetRemoteTag([]string{makeURL("/v1/")}, "foo42/baz", "foo")
+	if err != ErrRepoNotFound {
+		t.Fatal("Expected ErrRepoNotFound error when fetching tag for bogus repo")
+	}
+}
+
+func TestGetRemoteTags(t *testing.T) {
+	r := spawnTestRegistrySession(t)
+	tags, err := r.GetRemoteTags([]string{makeURL("/v1/")}, REPO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, len(tags), 2, "Expected two tags")
+	assertEqual(t, tags["latest"], imageID, "Expected tag latest to map to "+imageID)
+	assertEqual(t, tags["test"], imageID, "Expected tag test to map to "+imageID)
+
+	_, err = r.GetRemoteTags([]string{makeURL("/v1/")}, "foo42/baz")
+	if err != ErrRepoNotFound {
+		t.Fatal("Expected ErrRepoNotFound error when fetching tags for bogus repo")
 	}
 }
 
@@ -264,7 +270,7 @@ func TestPushImageJSONRegistry(t *testing.T) {
 		Checksum: "sha256:1ac330d56e05eef6d438586545ceff7550d3bdcb6b19961f12c5ba714ee1bb37",
 	}
 
-	err := r.PushImageJSONRegistry(imgData, []byte{0x42, 0xdf, 0x0}, makeURL("/v1/"), token)
+	err := r.PushImageJSONRegistry(imgData, []byte{0x42, 0xdf, 0x0}, makeURL("/v1/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +279,7 @@ func TestPushImageJSONRegistry(t *testing.T) {
 func TestPushImageLayerRegistry(t *testing.T) {
 	r := spawnTestRegistrySession(t)
 	layer := strings.NewReader("")
-	_, _, err := r.PushImageLayerRegistry(imageID, layer, makeURL("/v1/"), token, []byte{})
+	_, _, err := r.PushImageLayerRegistry(imageID, layer, makeURL("/v1/"), []byte{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +304,9 @@ func TestValidateRepositoryName(t *testing.T) {
 	invalidRepoNames := []string{
 		"https://github.com/docker/docker",
 		"docker/Docker",
+		"-docker",
+		"-docker/docker",
+		"-docker.io/docker/docker",
 		"docker///docker",
 		"docker.io/docker/Docker",
 		"docker.io/docker///docker",
@@ -690,7 +699,7 @@ func TestNewIndexInfo(t *testing.T) {
 
 func TestPushRegistryTag(t *testing.T) {
 	r := spawnTestRegistrySession(t)
-	err := r.PushRegistryTag("foo42/bar", imageID, "stable", makeURL("/v1/"), token)
+	err := r.PushRegistryTag("foo42/bar", imageID, "stable", makeURL("/v1/"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +744,7 @@ func TestSearchRepositories(t *testing.T) {
 	}
 	assertEqual(t, results.NumResults, 1, "Expected 1 search results")
 	assertEqual(t, results.Query, "fakequery", "Expected 'fakequery' as query")
-	assertEqual(t, results.Results[0].StarCount, 42, "Expected 'fakeimage' a ot hae 42 stars")
+	assertEqual(t, results.Results[0].StarCount, 42, "Expected 'fakeimage' to have 42 stars")
 }
 
 func TestValidRemoteName(t *testing.T) {
@@ -748,9 +757,6 @@ func TestValidRemoteName(t *testing.T) {
 
 		// Allow embedded hyphens.
 		"docker-rules/docker",
-
-		// Allow underscores everywhere (as opposed to hyphens).
-		"____/____",
 
 		//Username doc and image name docker being tested.
 		"doc/docker",
@@ -775,6 +781,11 @@ func TestValidRemoteName(t *testing.T) {
 		"-docker/docker",
 		"docker-/docker",
 		"-docker-/docker",
+
+		// Don't allow underscores everywhere (as opposed to hyphens).
+		"____/____",
+
+		"_docker/_docker",
 
 		// Disallow consecutive hyphens.
 		"dock--er/docker",
@@ -900,4 +911,27 @@ func TestIsSecureIndex(t *testing.T) {
 			t.Errorf("isSecureIndex failed for %q %v, expected %v got %v", tt.addr, tt.insecureRegistries, tt.expected, sec)
 		}
 	}
+}
+
+type debugTransport struct {
+	http.RoundTripper
+	log func(...interface{})
+}
+
+func (tr debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	dump, err := httputil.DumpRequestOut(req, false)
+	if err != nil {
+		tr.log("could not dump request")
+	}
+	tr.log(string(dump))
+	resp, err := tr.RoundTripper.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	dump, err = httputil.DumpResponse(resp, false)
+	if err != nil {
+		tr.log("could not dump response")
+	}
+	tr.log(string(dump))
+	return resp, err
 }

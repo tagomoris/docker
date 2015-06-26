@@ -10,18 +10,21 @@ import (
 //
 // Usage: docker unpause CONTAINER [CONTAINER...]
 func (cli *DockerCli) CmdUnpause(args ...string) error {
-	cmd := cli.Subcmd("unpause", "CONTAINER [CONTAINER...]", "Unpause all processes within a container", true)
+	cmd := cli.Subcmd("unpause", []string{"CONTAINER [CONTAINER...]"}, "Unpause all processes within a container", true)
 	cmd.Require(flag.Min, 1)
-	cmd.ParseFlags(args, false)
+	cmd.ParseFlags(args, true)
 
-	var encounteredError error
+	var errNames []string
 	for _, name := range cmd.Args() {
 		if _, _, err := readBody(cli.call("POST", fmt.Sprintf("/containers/%s/unpause", name), nil, nil)); err != nil {
 			fmt.Fprintf(cli.err, "%s\n", err)
-			encounteredError = fmt.Errorf("Error: failed to unpause container named %s", name)
+			errNames = append(errNames, name)
 		} else {
 			fmt.Fprintf(cli.out, "%s\n", name)
 		}
 	}
-	return encounteredError
+	if len(errNames) > 0 {
+		return fmt.Errorf("Error: failed to unpause containers: %v", errNames)
+	}
+	return nil
 }

@@ -2,51 +2,35 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
-	"testing"
 
 	"github.com/docker/docker/api/types"
+	"github.com/go-check/check"
 )
 
-func TestLegacyImages(t *testing.T) {
-	_, body, err := sockRequest("GET", "/v1.6/images/json", nil)
-	if err != nil {
-		t.Fatalf("Error on GET: %s", err)
-	}
-
-	images := []types.LegacyImage{}
-	if err = json.Unmarshal(body, &images); err != nil {
-		t.Fatalf("Error on unmarshal: %s", err)
-	}
-
-	if len(images) == 0 || images[0].Tag == "" || images[0].Repository == "" {
-		t.Fatalf("Bad data: %q", images)
-	}
-
-	logDone("images - checking legacy json")
-}
-
-func TestApiImagesFilter(t *testing.T) {
+func (s *DockerSuite) TestApiImagesFilter(c *check.C) {
 	name := "utest:tag1"
 	name2 := "utest/docker:tag2"
 	name3 := "utest:5000/docker:tag3"
-	defer deleteImages(name, name2, name3)
-	dockerCmd(t, "tag", "busybox", name)
-	dockerCmd(t, "tag", "busybox", name2)
-	dockerCmd(t, "tag", "busybox", name3)
-
-	type image struct{ RepoTags []string }
+	for _, n := range []string{name, name2, name3} {
+		if out, err := exec.Command(dockerBinary, "tag", "busybox", n).CombinedOutput(); err != nil {
+			c.Fatal(err, out)
+		}
+	}
+	type image types.Image
 	getImages := func(filter string) []image {
 		v := url.Values{}
 		v.Set("filter", filter)
-		_, b, err := sockRequest("GET", "/images/json?"+v.Encode(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		status, b, err := sockRequest("GET", "/images/json?"+v.Encode(), nil)
+		c.Assert(status, check.Equals, http.StatusOK)
+		c.Assert(err, check.IsNil)
+
 		var images []image
 		if err := json.Unmarshal(b, &images); err != nil {
-			t.Fatal(err)
+			c.Fatal(err)
 		}
 
 		return images
@@ -54,47 +38,97 @@ func TestApiImagesFilter(t *testing.T) {
 
 	errMsg := "incorrect number of matches returned"
 	if images := getImages("utest*/*"); len(images[0].RepoTags) != 2 {
-		t.Fatal(errMsg)
+		c.Fatal(errMsg)
 	}
 	if images := getImages("utest"); len(images[0].RepoTags) != 1 {
-		t.Fatal(errMsg)
+		c.Fatal(errMsg)
 	}
 	if images := getImages("utest*"); len(images[0].RepoTags) != 1 {
-		t.Fatal(errMsg)
+		c.Fatal(errMsg)
 	}
 	if images := getImages("*5000*/*"); len(images[0].RepoTags) != 1 {
-		t.Fatal(errMsg)
+		c.Fatal(errMsg)
 	}
-
-	logDone("images - filter param is applied")
 }
 
-func TestApiImagesSaveAndLoad(t *testing.T) {
+func (s *DockerSuite) TestApiImagesSaveAndLoad(c *check.C) {
+	testRequires(c, Network)
 	out, err := buildImage("saveandload", "FROM hello-world\nENV FOO bar", false)
 	if err != nil {
-		t.Fatal(err)
+		c.Fatal(err)
 	}
 	id := strings.TrimSpace(out)
-	defer deleteImages("saveandload")
 
-	_, body, err := sockRequestRaw("GET", "/images/"+id+"/get", nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res, body, err := sockRequestRaw("GET", "/images/"+id+"/get", nil, "")
+	c.Assert(err, check.IsNil)
+	c.Assert(res.StatusCode, check.Equals, http.StatusOK)
+
 	defer body.Close()
 
-	dockerCmd(t, "rmi", id)
-
-	_, loadBody, err := sockRequestRaw("POST", "/images/load", body, "application/x-tar")
-	if err != nil {
-		t.Fatal(err)
+	if out, err := exec.Command(dockerBinary, "rmi", id).CombinedOutput(); err != nil {
+		c.Fatal(err, out)
 	}
+
+	res, loadBody, err := sockRequestRaw("POST", "/images/load", body, "application/x-tar")
+	c.Assert(err, check.IsNil)
+	c.Assert(res.StatusCode, check.Equals, http.StatusOK)
+
 	defer loadBody.Close()
 
-	out, _ = dockerCmd(t, "inspect", "--format='{{ .Id }}'", id)
-	if strings.TrimSpace(out) != id {
-		t.Fatal("load did not work properly")
+	inspectOut, err := exec.Command(dockerBinary, "inspect", "--format='{{ .Id }}'", id).CombinedOutput()
+	if err != nil {
+		c.Fatal(err, inspectOut)
+	}
+	if strings.TrimSpace(string(inspectOut)) != id {
+		c.Fatal("load did not work properly")
+	}
+}
+
+func (s *DockerSuite) TestApiImagesDelete(c *check.C) {
+	testRequires(c, Network)
+	name := "test-api-images-delete"
+	out, err := buildImage(name, "FROM hello-world\nENV FOO bar", false)
+	if err != nil {
+		c.Fatal(err)
+	}
+	defer deleteImages(name)
+	id := strings.TrimSpace(out)
+
+	if out, err := exec.Command(dockerBinary, "tag", name, "test:tag1").CombinedOutput(); err != nil {
+		c.Fatal(err, out)
 	}
 
-	logDone("images API - save and load")
+	status, _, err := sockRequest("DELETE", "/images/"+id, nil)
+	c.Assert(status, check.Equals, http.StatusConflict)
+	c.Assert(err, check.IsNil)
+
+	status, _, err = sockRequest("DELETE", "/images/test:noexist", nil)
+	c.Assert(status, check.Equals, http.StatusNotFound) //Status Codes:404 – no such image
+	c.Assert(err, check.IsNil)
+
+	status, _, err = sockRequest("DELETE", "/images/test:tag1", nil)
+	c.Assert(status, check.Equals, http.StatusOK)
+	c.Assert(err, check.IsNil)
+}
+
+func (s *DockerSuite) TestApiImagesHistory(c *check.C) {
+	testRequires(c, Network)
+	name := "test-api-images-history"
+	out, err := buildImage(name, "FROM hello-world\nENV FOO bar", false)
+	c.Assert(err, check.IsNil)
+
+	defer deleteImages(name)
+	id := strings.TrimSpace(out)
+
+	status, body, err := sockRequest("GET", "/images/"+id+"/history", nil)
+	c.Assert(err, check.IsNil)
+	c.Assert(status, check.Equals, http.StatusOK)
+
+	var historydata []types.ImageHistory
+	if err = json.Unmarshal(body, &historydata); err != nil {
+		c.Fatalf("Error on unmarshal: %s", err)
+	}
+
+	c.Assert(len(historydata), check.Not(check.Equals), 0)
+	c.Assert(historydata[0].Tags[0], check.Equals, "test-api-images-history:latest")
 }

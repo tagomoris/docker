@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"strconv"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/graphdriver"
@@ -77,6 +78,7 @@ func (d *Driver) Status() [][2]string {
 		{"Metadata Space Total", fmt.Sprintf("%s", units.HumanSize(float64(s.Metadata.Total)))},
 		{"Metadata Space Available", fmt.Sprintf("%s", units.HumanSize(float64(s.Metadata.Available)))},
 		{"Udev Sync Supported", fmt.Sprintf("%v", s.UdevSyncSupported)},
+		{"Deferred Removal Enabled", fmt.Sprintf("%v", s.DeferredRemoveEnabled)},
 	}
 	if len(s.DataLoopback) > 0 {
 		status = append(status, [2]string{"Data loop file", s.DataLoopback})
@@ -88,6 +90,20 @@ func (d *Driver) Status() [][2]string {
 		status = append(status, [2]string{"Library Version", vStr})
 	}
 	return status
+}
+
+func (d *Driver) GetMetadata(id string) (map[string]string, error) {
+	m, err := d.DeviceSet.ExportDeviceMetadata(id)
+
+	if err != nil {
+		return nil, err
+	}
+
+	metadata := make(map[string]string)
+	metadata["DeviceId"] = strconv.Itoa(m.deviceId)
+	metadata["DeviceSize"] = strconv.FormatUint(m.deviceSize, 10)
+	metadata["DeviceName"] = m.deviceName
+	return metadata, nil
 }
 
 func (d *Driver) Cleanup() error {

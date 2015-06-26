@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
@@ -14,59 +14,17 @@ import (
 type FsMagic uint32
 
 const (
-	FsMagicAufs        = FsMagic(0x61756673)
-	FsMagicBtrfs       = FsMagic(0x9123683E)
-	FsMagicCramfs      = FsMagic(0x28cd3d45)
-	FsMagicExtfs       = FsMagic(0x0000EF53)
-	FsMagicF2fs        = FsMagic(0xF2F52010)
-	FsMagicJffs2Fs     = FsMagic(0x000072b6)
-	FsMagicJfs         = FsMagic(0x3153464a)
-	FsMagicNfsFs       = FsMagic(0x00006969)
-	FsMagicRamFs       = FsMagic(0x858458f6)
-	FsMagicReiserFs    = FsMagic(0x52654973)
-	FsMagicSmbFs       = FsMagic(0x0000517B)
-	FsMagicSquashFs    = FsMagic(0x73717368)
-	FsMagicTmpFs       = FsMagic(0x01021994)
 	FsMagicUnsupported = FsMagic(0x00000000)
-	FsMagicXfs         = FsMagic(0x58465342)
-	FsMagicZfs         = FsMagic(0x2fc12fc1)
 )
 
 var (
 	DefaultDriver string
 	// All registred drivers
 	drivers map[string]InitFunc
-	// Slice of drivers that should be used in an order
-	priority = []string{
-		"aufs",
-		"btrfs",
-		"devicemapper",
-		"overlay",
-		"vfs",
-	}
 
 	ErrNotSupported   = errors.New("driver not supported")
 	ErrPrerequisites  = errors.New("prerequisites for driver not satisfied (wrong filesystem?)")
 	ErrIncompatibleFS = fmt.Errorf("backing file system is unsupported for this graph driver")
-
-	FsNames = map[FsMagic]string{
-		FsMagicAufs:        "aufs",
-		FsMagicBtrfs:       "btrfs",
-		FsMagicCramfs:      "cramfs",
-		FsMagicExtfs:       "extfs",
-		FsMagicF2fs:        "f2fs",
-		FsMagicJffs2Fs:     "jffs2",
-		FsMagicJfs:         "jfs",
-		FsMagicNfsFs:       "nfs",
-		FsMagicRamFs:       "ramfs",
-		FsMagicReiserFs:    "reiserfs",
-		FsMagicSmbFs:       "smb",
-		FsMagicSquashFs:    "squashfs",
-		FsMagicTmpFs:       "tmpfs",
-		FsMagicUnsupported: "unsupported",
-		FsMagicXfs:         "xfs",
-		FsMagicZfs:         "zfs",
-	}
 )
 
 type InitFunc func(root string, options []string) (Driver, error)
@@ -98,6 +56,9 @@ type ProtoDriver interface {
 	// Status returns a set of key-value pairs which give low
 	// level diagnostic status about this driver.
 	Status() [][2]string
+	// Returns a set of key-value pairs which give low level information
+	// about the image/container driver is managing.
+	GetMetadata(id string) (map[string]string, error)
 	// Cleanup performs necessary tasks to release resources
 	// held by the driver, e.g., unmounting all layered filesystems
 	// known to this driver.
@@ -138,7 +99,7 @@ func Register(name string, initFunc InitFunc) error {
 
 func GetDriver(name, home string, options []string) (Driver, error) {
 	if initFunc, exists := drivers[name]; exists {
-		return initFunc(path.Join(home, name), options)
+		return initFunc(filepath.Join(home, name), options)
 	}
 	return nil, ErrNotSupported
 }
@@ -209,7 +170,7 @@ func New(root string, options []string) (driver Driver, err error) {
 func scanPriorDrivers(root string) []string {
 	priorDrivers := []string{}
 	for driver := range drivers {
-		p := path.Join(root, driver)
+		p := filepath.Join(root, driver)
 		if _, err := os.Stat(p); err == nil {
 			priorDrivers = append(priorDrivers, driver)
 		}
@@ -221,7 +182,7 @@ func checkPriorDriver(name, root string) error {
 	priorDrivers := []string{}
 	for _, prior := range scanPriorDrivers(root) {
 		if prior != name && prior != "vfs" {
-			if _, err := os.Stat(path.Join(root, prior)); err == nil {
+			if _, err := os.Stat(filepath.Join(root, prior)); err == nil {
 				priorDrivers = append(priorDrivers, prior)
 			}
 		}

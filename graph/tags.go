@@ -14,10 +14,12 @@ import (
 	"sync"
 
 	"github.com/docker/docker/daemon/events"
+	"github.com/docker/docker/graph/tags"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/registry"
+	"github.com/docker/docker/trust"
 	"github.com/docker/docker/utils"
 	"github.com/docker/libtrust"
 )
@@ -25,9 +27,8 @@ import (
 const DEFAULTTAG = "latest"
 
 var (
-	//FIXME these 2 regexes also exist in registry/v2/regexp.go
-	validTagName = regexp.MustCompile(`^[\w][\w.-]{0,127}$`)
-	validDigest  = regexp.MustCompile(`[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+`)
+	//FIXME this regex also exists in registry/v2/regexp.go
+	validDigest = regexp.MustCompile(`[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+`)
 )
 
 type TagStore struct {
@@ -42,6 +43,7 @@ type TagStore struct {
 	pushingPool     map[string]chan struct{}
 	registryService *registry.Service
 	eventsService   *events.Events
+	trustService    *trust.TrustStore
 }
 
 type Repository map[string]string
@@ -64,7 +66,15 @@ func (r Repository) Contains(u Repository) bool {
 	return true
 }
 
-func NewTagStore(path string, graph *Graph, key libtrust.PrivateKey, registryService *registry.Service, eventsService *events.Events) (*TagStore, error) {
+type TagStoreConfig struct {
+	Graph    *Graph
+	Key      libtrust.PrivateKey
+	Registry *registry.Service
+	Events   *events.Events
+	Trust    *trust.TrustStore
+}
+
+func NewTagStore(path string, cfg *TagStoreConfig) (*TagStore, error) {
 	abspath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -72,13 +82,14 @@ func NewTagStore(path string, graph *Graph, key libtrust.PrivateKey, registrySer
 
 	store := &TagStore{
 		path:            abspath,
-		graph:           graph,
-		trustKey:        key,
+		graph:           cfg.Graph,
+		trustKey:        cfg.Key,
 		Repositories:    make(map[string]Repository),
 		pullingPool:     make(map[string]chan struct{}),
 		pushingPool:     make(map[string]chan struct{}),
-		registryService: registryService,
-		eventsService:   eventsService,
+		registryService: cfg.Registry,
+		eventsService:   cfg.Events,
+		trustService:    cfg.Trust,
 	}
 	// Load the json file if it exists, otherwise create it.
 	if err := store.reload(); os.IsNotExist(err) {
@@ -104,11 +115,12 @@ func (store *TagStore) save() error {
 }
 
 func (store *TagStore) reload() error {
-	jsonData, err := ioutil.ReadFile(store.path)
+	f, err := os.Open(store.path)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(jsonData, store); err != nil {
+	defer f.Close()
+	if err := json.NewDecoder(f).Decode(&store); err != nil {
 		return err
 	}
 	return nil
@@ -236,12 +248,12 @@ func (store *TagStore) SetLoad(repoName, tag, imageName string, force bool, out 
 		return err
 	}
 	if tag == "" {
-		tag = DEFAULTTAG
+		tag = tags.DEFAULTTAG
 	}
 	if err := validateRepoName(repoName); err != nil {
 		return err
 	}
-	if err := ValidateTagName(tag); err != nil {
+	if err := tags.ValidateTagName(tag); err != nil {
 		return err
 	}
 	if err := store.reload(); err != nil {
@@ -335,9 +347,12 @@ func (store *TagStore) GetImage(repoName, refOrID string) (*image.Image, error) 
 	}
 
 	// If no matching tag is found, search through images for a matching image id
-	for _, revision := range repo {
-		if strings.HasPrefix(revision, refOrID) {
-			return store.graph.Get(revision)
+	// iff it looks like a short ID or would look like a short ID
+	if stringid.IsShortID(stringid.TruncateID(refOrID)) {
+		for _, revision := range repo {
+			if strings.HasPrefix(revision, refOrID) {
+				return store.graph.Get(revision)
+			}
 		}
 	}
 
@@ -365,17 +380,6 @@ func validateRepoName(name string) error {
 	}
 	if name == "scratch" {
 		return fmt.Errorf("'scratch' is a reserved name")
-	}
-	return nil
-}
-
-// ValidateTagName validates the name of a tag
-func ValidateTagName(name string) error {
-	if name == "" {
-		return fmt.Errorf("tag name can't be empty")
-	}
-	if !validTagName.MatchString(name) {
-		return fmt.Errorf("Illegal tag name (%s): only [A-Za-z0-9_.-] are allowed, minimum 1, maximum 128 in length", name)
 	}
 	return nil
 }

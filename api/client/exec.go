@@ -15,7 +15,7 @@ import (
 //
 // Usage: docker exec [OPTIONS] CONTAINER COMMAND [ARG...]
 func (cli *DockerCli) CmdExec(args ...string) error {
-	cmd := cli.Subcmd("exec", "CONTAINER COMMAND [ARG...]", "Run a command in a running container", true)
+	cmd := cli.Subcmd("exec", []string{"CONTAINER COMMAND [ARG...]"}, "Run a command in a running container", true)
 
 	execConfig, err := runconfig.ParseExec(cmd, args)
 	// just in case the ParseExec does not exit
@@ -23,7 +23,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 		return StatusError{StatusCode: 1}
 	}
 
-	stream, _, err := cli.call("POST", "/containers/"+execConfig.Container+"/exec", execConfig, nil)
+	stream, _, _, err := cli.call("POST", "/containers/"+execConfig.Container+"/exec", execConfig, nil)
 	if err != nil {
 		return err
 	}
@@ -31,9 +31,6 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 	var response types.ContainerExecCreateResponse
 	if err := json.NewDecoder(stream).Decode(&response); err != nil {
 		return err
-	}
-	for _, warning := range response.Warnings {
-		fmt.Fprintf(cli.err, "WARNING: %s\n", warning)
 	}
 
 	execID := response.ID
@@ -43,12 +40,18 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 		return nil
 	}
 
+	//Temp struct for execStart so that we don't need to transfer all the execConfig
+	execStartCheck := &types.ExecStartCheck{
+		Detach: execConfig.Detach,
+		Tty:    execConfig.Tty,
+	}
+
 	if !execConfig.Detach {
 		if err := cli.CheckTtyInput(execConfig.AttachStdin, execConfig.Tty); err != nil {
 			return err
 		}
 	} else {
-		if _, _, err := readBody(cli.call("POST", "/exec/"+execID+"/start", execConfig, nil)); err != nil {
+		if _, _, err := readBody(cli.call("POST", "/exec/"+execID+"/start", execStartCheck, nil)); err != nil {
 			return err
 		}
 		// For now don't print this - wait for when we support exec wait()
@@ -68,7 +71,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 	defer func() {
 		logrus.Debugf("End of CmdExec(), Waiting for hijack to finish.")
 		if _, ok := <-hijacked; ok {
-			logrus.Errorf("Hijack did not finish (chan still open)")
+			fmt.Fprintln(cli.err, "Hijack did not finish (chan still open)")
 		}
 	}()
 
@@ -106,7 +109,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 
 	if execConfig.Tty && cli.isTerminalIn {
 		if err := cli.monitorTtySize(execID, true); err != nil {
-			logrus.Errorf("Error monitoring TTY size: %s", err)
+			fmt.Fprintf(cli.err, "Error monitoring TTY size: %s\n", err)
 		}
 	}
 

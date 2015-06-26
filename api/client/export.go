@@ -3,7 +3,6 @@ package client
 import (
 	"errors"
 	"io"
-	"net/url"
 	"os"
 
 	flag "github.com/docker/docker/pkg/mflag"
@@ -15,7 +14,7 @@ import (
 //
 // Usage: docker export [OPTIONS] CONTAINER
 func (cli *DockerCli) CmdExport(args ...string) error {
-	cmd := cli.Subcmd("export", "CONTAINER", "Export a filesystem as a tar archive (streamed to STDOUT by default)", true)
+	cmd := cli.Subcmd("export", []string{"CONTAINER"}, "Export a filesystem as a tar archive (streamed to STDOUT by default)", true)
 	outfile := cmd.String([]string{"o", "-output"}, "", "Write to a file, instead of STDOUT")
 	cmd.Require(flag.Exact, 1)
 
@@ -34,19 +33,13 @@ func (cli *DockerCli) CmdExport(args ...string) error {
 		return errors.New("Cowardly refusing to save to a terminal. Use the -o flag or redirect.")
 	}
 
-	if len(cmd.Args()) == 1 {
-		image := cmd.Arg(0)
-		if err := cli.stream("GET", "/containers/"+image+"/export", nil, output, nil); err != nil {
-			return err
-		}
-	} else {
-		v := url.Values{}
-		for _, arg := range cmd.Args() {
-			v.Add("names", arg)
-		}
-		if err := cli.stream("GET", "/containers/get?"+v.Encode(), nil, output, nil); err != nil {
-			return err
-		}
+	image := cmd.Arg(0)
+	sopts := &streamOpts{
+		rawTerminal: true,
+		out:         output,
+	}
+	if err := cli.stream("GET", "/containers/"+image+"/export", sopts); err != nil {
+		return err
 	}
 
 	return nil

@@ -3,7 +3,6 @@ package runconfig
 import (
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/nat"
 )
 
@@ -18,39 +17,6 @@ func Merge(userConf, imageConf *Config) error {
 			userConf.ExposedPorts = make(nat.PortSet)
 		}
 		for port := range imageConf.ExposedPorts {
-			if _, exists := userConf.ExposedPorts[port]; !exists {
-				userConf.ExposedPorts[port] = struct{}{}
-			}
-		}
-	}
-
-	if len(userConf.PortSpecs) > 0 {
-		if userConf.ExposedPorts == nil {
-			userConf.ExposedPorts = make(nat.PortSet)
-		}
-		ports, _, err := nat.ParsePortSpecs(userConf.PortSpecs)
-		if err != nil {
-			return err
-		}
-		for port := range ports {
-			if _, exists := userConf.ExposedPorts[port]; !exists {
-				userConf.ExposedPorts[port] = struct{}{}
-			}
-		}
-		userConf.PortSpecs = nil
-	}
-	if len(imageConf.PortSpecs) > 0 {
-		// FIXME: I think we can safely remove this. Leaving it for now for the sake of reverse-compat paranoia.
-		logrus.Debugf("Migrating image port specs to containter: %s", strings.Join(imageConf.PortSpecs, ", "))
-		if userConf.ExposedPorts == nil {
-			userConf.ExposedPorts = make(nat.PortSet)
-		}
-
-		ports, _, err := nat.ParsePortSpecs(imageConf.PortSpecs)
-		if err != nil {
-			return err
-		}
-		for port := range ports {
 			if _, exists := userConf.ExposedPorts[port]; !exists {
 				userConf.ExposedPorts[port] = struct{}{}
 			}
@@ -73,16 +39,6 @@ func Merge(userConf, imageConf *Config) error {
 				userConf.Env = append(userConf.Env, imageEnv)
 			}
 		}
-	}
-
-	if userConf.Labels == nil {
-		userConf.Labels = map[string]string{}
-	}
-	if imageConf.Labels != nil {
-		for l := range userConf.Labels {
-			imageConf.Labels[l] = userConf.Labels[l]
-		}
-		userConf.Labels = imageConf.Labels
 	}
 
 	if userConf.Entrypoint.Len() == 0 {

@@ -17,20 +17,20 @@ import (
 //
 // Usage: docker history [OPTIONS] IMAGE
 func (cli *DockerCli) CmdHistory(args ...string) error {
-	cmd := cli.Subcmd("history", "IMAGE", "Show the history of an image", true)
+	cmd := cli.Subcmd("history", []string{"IMAGE"}, "Show the history of an image", true)
+	human := cmd.Bool([]string{"H", "-human"}, true, "Print sizes and dates in human readable format")
 	quiet := cmd.Bool([]string{"q", "-quiet"}, false, "Only show numeric IDs")
 	noTrunc := cmd.Bool([]string{"#notrunc", "-no-trunc"}, false, "Don't truncate output")
 	cmd.Require(flag.Exact, 1)
 	cmd.ParseFlags(args, true)
 
-	rdr, _, err := cli.call("GET", "/images/"+cmd.Arg(0)+"/history", nil, nil)
+	rdr, _, _, err := cli.call("GET", "/images/"+cmd.Arg(0)+"/history", nil, nil)
 	if err != nil {
 		return err
 	}
 
 	history := []types.ImageHistory{}
-	err = json.NewDecoder(rdr).Decode(&history)
-	if err != nil {
+	if err := json.NewDecoder(rdr).Decode(&history); err != nil {
 		return err
 	}
 
@@ -46,14 +46,24 @@ func (cli *DockerCli) CmdHistory(args ...string) error {
 			fmt.Fprintf(w, stringid.TruncateID(entry.ID))
 		}
 		if !*quiet {
-			fmt.Fprintf(w, "\t%s ago\t", units.HumanDuration(time.Now().UTC().Sub(time.Unix(entry.Created, 0))))
+			if *human {
+				fmt.Fprintf(w, "\t%s ago\t", units.HumanDuration(time.Now().UTC().Sub(time.Unix(entry.Created, 0))))
+			} else {
+				fmt.Fprintf(w, "\t%s\t", time.Unix(entry.Created, 0).Format(time.RFC3339))
+			}
 
 			if *noTrunc {
 				fmt.Fprintf(w, "%s\t", entry.CreatedBy)
 			} else {
 				fmt.Fprintf(w, "%s\t", stringutils.Truncate(entry.CreatedBy, 45))
 			}
-			fmt.Fprintf(w, "%s\t", units.HumanSize(float64(entry.Size)))
+
+			if *human {
+				fmt.Fprintf(w, "%s\t", units.HumanSize(float64(entry.Size)))
+			} else {
+				fmt.Fprintf(w, "%d\t", entry.Size)
+			}
+
 			fmt.Fprintf(w, "%s", entry.Comment)
 		}
 		fmt.Fprintf(w, "\n")

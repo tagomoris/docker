@@ -5,45 +5,58 @@ package server
 import (
 	"errors"
 	"net"
+	"net/http"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/docker/docker/engine"
+	"github.com/docker/docker/daemon"
+	"github.com/docker/docker/pkg/version"
+	"github.com/docker/docker/runconfig"
 )
 
 // NewServer sets up the required Server and does protocol specific checking.
-func NewServer(proto, addr string, job *engine.Job) (Server, error) {
+func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
 	var (
-		err error
-		l   net.Listener
-		r   = createRouter(
-			job.Eng,
-			job.GetenvBool("Logging"),
-			job.GetenvBool("EnableCors"),
-			job.Getenv("CorsHeaders"),
-			job.Getenv("Version"),
-		)
+		ls []net.Listener
 	)
 	switch proto {
 	case "tcp":
-		if !job.GetenvBool("TlsVerify") {
-			logrus.Warn("/!\\ DON'T BIND ON ANY IP ADDRESS WITHOUT setting -tlsverify IF YOU DON'T KNOW WHAT YOU'RE DOING /!\\")
-		}
-		if l, err = NewTcpSocket(addr, tlsConfigFromJob(job)); err != nil {
+		l, err := s.initTcpSocket(addr)
+		if err != nil {
 			return nil, err
 		}
-		if err := allocateDaemonPort(addr); err != nil {
-			return nil, err
-		}
+		ls = append(ls, l)
+
 	default:
 		return nil, errors.New("Invalid protocol format. Windows only supports tcp.")
 	}
+
+	var res []serverCloser
+	for _, l := range ls {
+		res = append(res, &HttpServer{
+			&http.Server{
+				Addr:    addr,
+				Handler: s.router,
+			},
+			l,
+		})
+	}
+	return res, nil
+
 }
 
-func AcceptConnections() {
+func (s *Server) AcceptConnections(d *daemon.Daemon) {
+	s.daemon = d
+	s.registerSubRouter()
 	// close the lock so the listeners start accepting connections
 	select {
-	case <-activationLock:
+	case <-s.start:
 	default:
-		close(activationLock)
+		close(s.start)
 	}
+}
+
+func allocateDaemonPort(addr string) error {
+	return nil
+}
+
+func adjustCpuShares(version version.Version, hostConfig *runconfig.HostConfig) {
 }

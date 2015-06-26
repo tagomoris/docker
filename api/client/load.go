@@ -13,7 +13,7 @@ import (
 //
 // Usage: docker load [OPTIONS]
 func (cli *DockerCli) CmdLoad(args ...string) error {
-	cmd := cli.Subcmd("load", "", "Load an image from a tar archive on STDIN", true)
+	cmd := cli.Subcmd("load", nil, "Load an image from a tar archive on STDIN", true)
 	infile := cmd.String([]string{"i", "-input"}, "", "Read from a tar archive file, instead of STDIN")
 	cmd.Require(flag.Exact, 0)
 
@@ -29,7 +29,12 @@ func (cli *DockerCli) CmdLoad(args ...string) error {
 			return err
 		}
 	}
-	if err := cli.stream("POST", "/images/load", input, cli.out, nil); err != nil {
+	sopts := &streamOpts{
+		rawTerminal: true,
+		in:          input,
+		out:         cli.out,
+	}
+	if err := cli.stream("POST", "/images/load", sopts); err != nil {
 		return err
 	}
 	return nil

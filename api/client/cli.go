@@ -6,18 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"text/template"
-	"time"
 
+	"github.com/docker/docker/cliconfig"
 	"github.com/docker/docker/pkg/homedir"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/term"
-	"github.com/docker/docker/registry"
+	"github.com/docker/docker/utils"
 )
 
 // DockerCli represents the docker command line client.
@@ -27,8 +26,9 @@ type DockerCli struct {
 	proto string
 	// addr holds the client address.
 	addr string
-	// configFile holds the configuration file (instance of registry.ConfigFile).
-	configFile *registry.ConfigFile
+
+	// configFile has the client configuration file
+	configFile *cliconfig.ConfigFile
 	// in holds the input stream and closer (io.ReadCloser) for the client.
 	in io.ReadCloser
 	// out holds the output stream (io.Writer) for the client.
@@ -61,6 +61,14 @@ var funcMap = template.FuncMap{
 	},
 }
 
+func (cli *DockerCli) Out() io.Writer {
+	return cli.out
+}
+
+func (cli *DockerCli) Err() io.Writer {
+	return cli.err
+}
+
 func (cli *DockerCli) getMethod(args ...string) (func(...string) error, bool) {
 	camelArgs := make([]string, len(args))
 	for i, s := range args {
@@ -88,46 +96,78 @@ func (cli *DockerCli) Cmd(args ...string) error {
 	if len(args) > 0 {
 		method, exists := cli.getMethod(args[0])
 		if !exists {
-			fmt.Fprintf(cli.err, "docker: '%s' is not a docker command. See 'docker --help'.\n", args[0])
-			os.Exit(1)
+			return fmt.Errorf("docker: '%s' is not a docker command.\nSee 'docker --help'.", args[0])
 		}
 		return method(args[1:]...)
 	}
 	return cli.CmdHelp()
 }
 
-func (cli *DockerCli) Subcmd(name, signature, description string, exitOnError bool) *flag.FlagSet {
+// Subcmd is a subcommand of the main "docker" command.
+// A subcommand represents an action that can be performed
+// from the Docker command line client.
+//
+// Multiple subcommand synopses may be provided with one 'Usage' line being
+// printed for each in the following way:
+//
+//	Usage:	docker <subcmd-name> [OPTIONS] <synopsis 0>
+// 		docker <subcmd-name> [OPTIONS] <synopsis 1>
+// 		...
+//
+// If no undeprecated flags are added to the returned FlagSet, "[OPTIONS]" will
+// not be included on the usage synopsis lines. If no synopses are given, only
+// one usage synopsis line will be printed with nothing following the
+// "[OPTIONS]" section
+//
+// To see all available subcommands, run "docker --help".
+func (cli *DockerCli) Subcmd(name string, synopses []string, description string, exitOnError bool) *flag.FlagSet {
 	var errorHandling flag.ErrorHandling
 	if exitOnError {
 		errorHandling = flag.ExitOnError
 	} else {
 		errorHandling = flag.ContinueOnError
 	}
+
 	flags := flag.NewFlagSet(name, errorHandling)
+
 	flags.Usage = func() {
+		flags.ShortUsage()
+		flags.PrintDefaults()
+	}
+
+	flags.ShortUsage = func() {
 		options := ""
-		if signature != "" {
-			signature = " " + signature
-		}
 		if flags.FlagCountUndeprecated() > 0 {
 			options = " [OPTIONS]"
 		}
-		fmt.Fprintf(cli.out, "\nUsage: docker %s%s%s\n\n%s\n\n", name, options, signature, description)
-		flags.SetOutput(cli.out)
-		flags.PrintDefaults()
-		os.Exit(0)
+
+		if len(synopses) == 0 {
+			synopses = []string{""}
+		}
+
+		// Allow for multiple command usage synopses.
+		for i, synopsis := range synopses {
+			lead := "\t"
+			if i == 0 {
+				// First line needs the word 'Usage'.
+				lead = "Usage:\t"
+			}
+
+			if synopsis != "" {
+				synopsis = " " + synopsis
+			}
+
+			fmt.Fprintf(flags.Out(), "\n%sdocker %s%s%s", lead, name, options, synopsis)
+		}
+
+		fmt.Fprintf(flags.Out(), "\n\n%s\n", description)
 	}
+
 	return flags
 }
 
-func (cli *DockerCli) LoadConfigFile() (err error) {
-	cli.configFile, err = registry.LoadConfig(homedir.Get())
-	if err != nil {
-		fmt.Fprintf(cli.err, "WARNING: %s\n", err)
-	}
-	return err
-}
-
+// CheckTtyInput checks if we are trying to attach to a container tty
+// from a non-tty client input stream, and if so, returns an error.
 func (cli *DockerCli) CheckTtyInput(attachStdin, ttyMode bool) error {
 	// In order to attach to a container tty, input stream for the client must
 	// be a tty itself: redirecting or piping the client standard input is
@@ -170,23 +210,17 @@ func NewDockerCli(in io.ReadCloser, out, err io.Writer, keyFile string, proto, a
 	tr := &http.Transport{
 		TLSClientConfig: tlsConfig,
 	}
+	utils.ConfigureTCPTransport(tr, proto, addr)
 
-	// Why 32? See https://github.com/docker/docker/pull/8035.
-	timeout := 32 * time.Second
-	if proto == "unix" {
-		// No need for compression in local communications.
-		tr.DisableCompression = true
-		tr.Dial = func(_, _ string) (net.Conn, error) {
-			return net.DialTimeout(proto, addr, timeout)
-		}
-	} else {
-		tr.Proxy = http.ProxyFromEnvironment
-		tr.Dial = (&net.Dialer{Timeout: timeout}).Dial
+	configFile, e := cliconfig.Load(filepath.Join(homedir.Get(), ".docker"))
+	if e != nil {
+		fmt.Fprintf(err, "WARNING: Error loading config file:%v\n", e)
 	}
 
 	return &DockerCli{
 		proto:         proto,
 		addr:          addr,
+		configFile:    configFile,
 		in:            in,
 		out:           out,
 		err:           err,

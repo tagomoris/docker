@@ -45,7 +45,7 @@ need to package Docker your way, without denaturing it in the process.
 To build Docker, you will need the following:
 
 * A recent version of Git and Mercurial
-* Go version 1.3 or later
+* Go version 1.4 or later
 * A clean checkout of the source added to a valid [Go
   workspace](https://golang.org/doc/code.html#Workspaces) under the path
   *src/github.com/docker/docker* (unless you plan to use `AUTO_GOPATH`,
@@ -303,6 +303,7 @@ by having support for them in the kernel or userspace. A few examples include:
 * AUFS graph driver (requires AUFS patches/support enabled in the kernel, and at
   least the "auplink" utility from aufs-tools)
 * BTRFS graph driver (requires BTRFS support enabled in the kernel)
+* ZFS graph driver (requires userspace zfs-utils and a corresponding kernel module)
 
 ## Daemon Init Script
 

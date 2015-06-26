@@ -12,20 +12,23 @@ import (
 //
 // Usage: docker wait CONTAINER [CONTAINER...]
 func (cli *DockerCli) CmdWait(args ...string) error {
-	cmd := cli.Subcmd("wait", "CONTAINER [CONTAINER...]", "Block until a container stops, then print its exit code.", true)
+	cmd := cli.Subcmd("wait", []string{"CONTAINER [CONTAINER...]"}, "Block until a container stops, then print its exit code.", true)
 	cmd.Require(flag.Min, 1)
 
 	cmd.ParseFlags(args, true)
 
-	var encounteredError error
+	var errNames []string
 	for _, name := range cmd.Args() {
 		status, err := waitForExit(cli, name)
 		if err != nil {
 			fmt.Fprintf(cli.err, "%s\n", err)
-			encounteredError = fmt.Errorf("Error: failed to wait one or more containers")
+			errNames = append(errNames, name)
 		} else {
 			fmt.Fprintf(cli.out, "%d\n", status)
 		}
 	}
-	return encounteredError
+	if len(errNames) > 0 {
+		return fmt.Errorf("Error: failed to wait containers: %v", errNames)
+	}
+	return nil
 }

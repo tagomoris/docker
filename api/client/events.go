@@ -2,7 +2,6 @@ package client
 
 import (
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/docker/docker/opts"
@@ -15,7 +14,7 @@ import (
 //
 // Usage: docker events [OPTIONS]
 func (cli *DockerCli) CmdEvents(args ...string) error {
-	cmd := cli.Subcmd("events", "", "Get real time events from the server", true)
+	cmd := cli.Subcmd("events", nil, "Get real time events from the server", true)
 	since := cmd.String([]string{"#since", "-since"}, "", "Show all events created since timestamp")
 	until := cmd.String([]string{"-until"}, "", "Stream events until this timestamp")
 	flFilter := opts.NewListOpts(nil)
@@ -26,7 +25,6 @@ func (cli *DockerCli) CmdEvents(args ...string) error {
 
 	var (
 		v               = url.Values{}
-		loc             = time.FixedZone(time.Now().Zone())
 		eventFilterArgs = filters.Args{}
 	)
 
@@ -39,22 +37,12 @@ func (cli *DockerCli) CmdEvents(args ...string) error {
 			return err
 		}
 	}
-	var setTime = func(key, value string) {
-		format := timeutils.RFC3339NanoFixed
-		if len(value) < len(format) {
-			format = format[:len(value)]
-		}
-		if t, err := time.ParseInLocation(format, value, loc); err == nil {
-			v.Set(key, strconv.FormatInt(t.Unix(), 10))
-		} else {
-			v.Set(key, value)
-		}
-	}
+	ref := time.Now()
 	if *since != "" {
-		setTime("since", *since)
+		v.Set("since", timeutils.GetTimestamp(*since, ref))
 	}
 	if *until != "" {
-		setTime("until", *until)
+		v.Set("until", timeutils.GetTimestamp(*until, ref))
 	}
 	if len(eventFilterArgs) > 0 {
 		filterJSON, err := filters.ToParam(eventFilterArgs)
@@ -63,7 +51,11 @@ func (cli *DockerCli) CmdEvents(args ...string) error {
 		}
 		v.Set("filters", filterJSON)
 	}
-	if err := cli.stream("GET", "/events?"+v.Encode(), nil, cli.out, nil); err != nil {
+	sopts := &streamOpts{
+		rawTerminal: true,
+		out:         cli.out,
+	}
+	if err := cli.stream("GET", "/events?"+v.Encode(), sopts); err != nil {
 		return err
 	}
 	return nil

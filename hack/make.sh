@@ -24,10 +24,12 @@ set -e
 set -o pipefail
 
 export DOCKER_PKG='github.com/docker/docker'
+export SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+export MAKEDIR="$SCRIPTDIR/make"
 
 # We're a nice, sexy, little shell script, and people might try to run us;
 # but really, they shouldn't. We want to be in a container!
-if [ "$(pwd)" != "/go/src/$DOCKER_PKG" ] || [ -z "$DOCKER_CROSSPLATFORMS" ]; then
+if [ "$PWD" != "/go/src/$DOCKER_PKG" ] || [ -z "$DOCKER_CROSSPLATFORMS" ]; then
 	{
 		echo "# WARNING! I don't seem to be running in the Docker container."
 		echo "# The result of this command might be an incorrect build, and will not be"
@@ -44,6 +46,8 @@ echo
 DEFAULT_BUNDLES=(
 	validate-dco
 	validate-gofmt
+	validate-pkg
+	validate-test
 	validate-toml
 	validate-vet
 
@@ -54,7 +58,6 @@ DEFAULT_BUNDLES=(
 	test-docker-py
 
 	dynbinary
-	test-integration
 
 	cover
 	cross
@@ -62,12 +65,13 @@ DEFAULT_BUNDLES=(
 	ubuntu
 )
 
-VERSION=$(cat ./VERSION)
+VERSION=$(< ./VERSION)
 if command -v git &> /dev/null && git rev-parse &> /dev/null; then
 	GITCOMMIT=$(git rev-parse --short HEAD)
 	if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 		GITCOMMIT="$GITCOMMIT-dirty"
 	fi
+	BUILDTIME=$(date -u)
 elif [ "$DOCKER_GITCOMMIT" ]; then
 	GITCOMMIT="$DOCKER_GITCOMMIT"
 else
@@ -82,13 +86,19 @@ if [ "$AUTO_GOPATH" ]; then
 	rm -rf .gopath
 	mkdir -p .gopath/src/"$(dirname "${DOCKER_PKG}")"
 	ln -sf ../../../.. .gopath/src/"${DOCKER_PKG}"
-	export GOPATH="$(pwd)/.gopath:$(pwd)/vendor"
+	export GOPATH="${PWD}/.gopath:${PWD}/vendor"
 fi
 
 if [ ! "$GOPATH" ]; then
 	echo >&2 'error: missing GOPATH; please see https://golang.org/doc/code.html#GOPATH'
 	echo >&2 '  alternatively, set AUTO_GOPATH=1'
 	exit 1
+fi
+
+if [ "$DOCKER_EXPERIMENTAL" ]; then
+	echo >&2 '# WARNING! DOCKER_EXPERIMENTAL is set: building experimental features'
+	echo >&2
+	DOCKER_BUILDTAGS+=" experimental"
 fi
 
 if [ -z "$DOCKER_CLIENTONLY" ]; then
@@ -107,11 +117,22 @@ if \
 	DOCKER_BUILDTAGS+=' btrfs_noversion'
 fi
 
+# test whether "libdevmapper.h" is new enough to support deferred remove
+# functionality.
+if \
+	command -v gcc &> /dev/null \
+	&& ! ( echo -e  '#include <libdevmapper.h>\nint main() { dm_task_deferred_remove(NULL); }'| gcc -ldevmapper -xc - &> /dev/null ) \
+; then
+       DOCKER_BUILDTAGS+=' libdm_no_deferred_remove'
+fi
+
 # Use these flags when compiling the tests and final binary
 
 IAMSTATIC='true'
-source "$(dirname "$BASH_SOURCE")/make/.go-autogen"
-LDFLAGS='-w'
+source "$SCRIPTDIR/make/.go-autogen"
+if [ -z "$DOCKER_DEBUG" ]; then
+	LDFLAGS='-w'
+fi
 
 LDFLAGS_STATIC='-linkmode external'
 # Cgo -H windows is incompatible with -linkmode external.
@@ -165,7 +186,12 @@ fi
 # If $TESTFLAGS is set in the environment, it is passed as extra arguments to 'go test'.
 # You can use this to select certain tests to run, eg.
 #
-#   TESTFLAGS='-run ^TestBuild$' ./hack/make.sh test
+#     TESTFLAGS='-test.run ^TestBuild$' ./hack/make.sh test-unit
+#
+# For integration-cli test, we use [gocheck](https://labix.org/gocheck), if you want
+# to run certain tests on your local host, you should run with command:
+#
+#     TESTFLAGS='-check.f DockerSuite.TestBuild*' ./hack/make.sh binary test-integration-cli
 #
 go_test_dir() {
 	dir=$1
@@ -175,13 +201,13 @@ go_test_dir() {
 		# if our current go install has -cover, we want to use it :)
 		mkdir -p "$DEST/coverprofiles"
 		coverprofile="docker${dir#.}"
-		coverprofile="$DEST/coverprofiles/${coverprofile//\//-}"
+		coverprofile="$ABS_DEST/coverprofiles/${coverprofile//\//-}"
 		testcover=( -cover -coverprofile "$coverprofile" $coverpkg )
 	fi
 	(
-		export DEST
 		echo '+ go test' $TESTFLAGS "${DOCKER_PKG}${dir#.}"
 		cd "$dir"
+		export DEST="$ABS_DEST" # we're in a subshell, so this is safe -- our integration-cli tests need DEST, and "cd" screws it up
 		test_env go test ${testcover[@]} -ldflags "$LDFLAGS" "${BUILDFLAGS[@]}" $TESTFLAGS
 	)
 }
@@ -191,10 +217,12 @@ test_env() {
 		DEST="$DEST" \
 		DOCKER_EXECDRIVER="$DOCKER_EXECDRIVER" \
 		DOCKER_GRAPHDRIVER="$DOCKER_GRAPHDRIVER" \
+		DOCKER_USERLANDPROXY="$DOCKER_USERLANDPROXY" \
 		DOCKER_HOST="$DOCKER_HOST" \
 		GOPATH="$GOPATH" \
-		HOME="$DEST/fake-HOME" \
+		HOME="$ABS_DEST/fake-HOME" \
 		PATH="$PATH" \
+		TEMP="$TEMP" \
 		TEST_DOCKERINIT_PATH="$TEST_DOCKERINIT_PATH" \
 		"$@"
 }
@@ -213,7 +241,6 @@ find_dirs() {
 	find . -not \( \
 		\( \
 			-path './vendor/*' \
-			-o -path './integration/*' \
 			-o -path './integration-cli/*' \
 			-o -path './contrib/*' \
 			-o -path './pkg/mflag/example/*' \
@@ -248,11 +275,9 @@ hash_files() {
 }
 
 bundle() {
-	bundlescript=$1
-	bundle=$(basename $bundlescript)
-	echo "---> Making bundle: $bundle (in bundles/$VERSION/$bundle)"
-	mkdir -p bundles/$VERSION/$bundle
-	source "$bundlescript" "$(pwd)/bundles/$VERSION/$bundle"
+	local bundle="$1"; shift
+	echo "---> Making bundle: $(basename "$bundle") (in $DEST)"
+	source "$SCRIPTDIR/make/$bundle" "$@"
 }
 
 main() {
@@ -261,23 +286,31 @@ main() {
 	mkdir -p bundles
 	if [ -e "bundles/$VERSION" ]; then
 		echo "bundles/$VERSION already exists. Removing."
-		rm -fr bundles/$VERSION && mkdir bundles/$VERSION || exit 1
+		rm -fr "bundles/$VERSION" && mkdir "bundles/$VERSION" || exit 1
 		echo
 	fi
 
 	if [ "$(go env GOHOSTOS)" != 'windows' ]; then
 		# Windows and symlinks don't get along well
-		ln -sfT $VERSION bundles/latest
+
+		rm -f bundles/latest
+		ln -s "$VERSION" bundles/latest
 	fi
 
-	SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 	if [ $# -lt 1 ]; then
 		bundles=(${DEFAULT_BUNDLES[@]})
 	else
 		bundles=($@)
 	fi
 	for bundle in ${bundles[@]}; do
-		bundle $SCRIPTDIR/make/$bundle
+		export DEST="bundles/$VERSION/$(basename "$bundle")"
+		# Cygdrive paths don't play well with go build -o.
+		if [[ "$(uname -s)" == CYGWIN* ]]; then
+			export DEST="$(cygpath -mw "$DEST")"
+		fi
+		mkdir -p "$DEST"
+		ABS_DEST="$(cd "$DEST" && pwd -P)"
+		bundle "$bundle"
 		echo
 	done
 }

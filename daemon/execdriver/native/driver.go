@@ -15,6 +15,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/execdriver"
+	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/reexec"
 	sysinfo "github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/term"
@@ -40,22 +41,54 @@ type driver struct {
 	sync.Mutex
 }
 
-func NewDriver(root, initPath string) (*driver, error) {
+func NewDriver(root, initPath string, options []string) (*driver, error) {
 	meminfo, err := sysinfo.ReadMemInfo()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := sysinfo.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
 	// native driver root is at docker_root/execdriver/native. Put apparmor at docker_root
 	if err := apparmor.InstallDefaultProfile(); err != nil {
 		return nil, err
 	}
+
+	// choose cgroup manager
+	// this makes sure there are no breaking changes to people
+	// who upgrade from versions without native.cgroupdriver opt
 	cgm := libcontainer.Cgroupfs
 	if systemd.UseSystemd() {
 		cgm = libcontainer.SystemdCgroups
+	}
+
+	// parse the options
+	for _, option := range options {
+		key, val, err := parsers.ParseKeyValueOpt(option)
+		if err != nil {
+			return nil, err
+		}
+		key = strings.ToLower(key)
+		switch key {
+		case "native.cgroupdriver":
+			// override the default if they set options
+			switch val {
+			case "systemd":
+				if systemd.UseSystemd() {
+					cgm = libcontainer.SystemdCgroups
+				} else {
+					// warn them that they chose the wrong driver
+					logrus.Warn("You cannot use systemd as native.cgroupdriver, using cgroupfs instead")
+				}
+			case "cgroupfs":
+				cgm = libcontainer.Cgroupfs
+			default:
+				return nil, fmt.Errorf("Unknown native.cgroupdriver given %q. try cgroupfs or systemd", val)
+			}
+		default:
+			return nil, fmt.Errorf("Unknown option %s\n", key)
+		}
 	}
 
 	f, err := libcontainer.New(
@@ -88,8 +121,6 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
 
-	var term execdriver.Terminal
-
 	p := &libcontainer.Process{
 		Args: append([]string{c.ProcessConfig.Entrypoint}, c.ProcessConfig.Arguments...),
 		Env:  c.ProcessConfig.Env,
@@ -97,36 +128,9 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 		User: c.ProcessConfig.User,
 	}
 
-	if c.ProcessConfig.Tty {
-		rootuid, err := container.HostUID()
-		if err != nil {
-			return execdriver.ExitStatus{ExitCode: -1}, err
-		}
-		cons, err := p.NewConsole(rootuid)
-		if err != nil {
-			return execdriver.ExitStatus{ExitCode: -1}, err
-		}
-		term, err = NewTtyConsole(cons, pipes, rootuid)
-	} else {
-		p.Stdout = pipes.Stdout
-		p.Stderr = pipes.Stderr
-		r, w, err := os.Pipe()
-		if err != nil {
-			return execdriver.ExitStatus{ExitCode: -1}, err
-		}
-		if pipes.Stdin != nil {
-			go func() {
-				io.Copy(w, pipes.Stdin)
-				w.Close()
-			}()
-			p.Stdin = r
-		}
-		term = &execdriver.StdConsole{}
-	}
-	if err != nil {
+	if err := setupPipes(container, &c.ProcessConfig, p, pipes); err != nil {
 		return execdriver.ExitStatus{ExitCode: -1}, err
 	}
-	c.ProcessConfig.Terminal = term
 
 	cont, err := d.factory.Create(c.ID, container)
 	if err != nil {
@@ -239,7 +243,9 @@ func waitInPIDHost(p *libcontainer.Process, c libcontainer.Container) func() (*o
 }
 
 func (d *driver) Kill(c *execdriver.Command, sig int) error {
+	d.Lock()
 	active := d.activeContainers[c.ID]
+	d.Unlock()
 	if active == nil {
 		return fmt.Errorf("active container for %s does not exist", c.ID)
 	}
@@ -251,7 +257,9 @@ func (d *driver) Kill(c *execdriver.Command, sig int) error {
 }
 
 func (d *driver) Pause(c *execdriver.Command) error {
+	d.Lock()
 	active := d.activeContainers[c.ID]
+	d.Unlock()
 	if active == nil {
 		return fmt.Errorf("active container for %s does not exist", c.ID)
 	}
@@ -259,7 +267,9 @@ func (d *driver) Pause(c *execdriver.Command) error {
 }
 
 func (d *driver) Unpause(c *execdriver.Command) error {
+	d.Lock()
 	active := d.activeContainers[c.ID]
+	d.Unlock()
 	if active == nil {
 		return fmt.Errorf("active container for %s does not exist", c.ID)
 	}
@@ -327,7 +337,9 @@ func (d *driver) Clean(id string) error {
 }
 
 func (d *driver) Stats(id string) (*execdriver.ResourceStats, error) {
+	d.Lock()
 	c := d.activeContainers[id]
+	d.Unlock()
 	if c == nil {
 		return nil, execdriver.ErrNotRunning
 	}
@@ -347,16 +359,6 @@ func (d *driver) Stats(id string) (*execdriver.ResourceStats, error) {
 		Read:        now,
 		MemoryLimit: memoryLimit,
 	}, nil
-}
-
-func getEnv(key string, env []string) string {
-	for _, pair := range env {
-		parts := strings.Split(pair, "=")
-		if parts[0] == key {
-			return parts[1]
-		}
-	}
-	return ""
 }
 
 type TtyConsole struct {
@@ -408,4 +410,41 @@ func (t *TtyConsole) AttachPipes(pipes *execdriver.Pipes) error {
 
 func (t *TtyConsole) Close() error {
 	return t.console.Close()
+}
+
+func setupPipes(container *configs.Config, processConfig *execdriver.ProcessConfig, p *libcontainer.Process, pipes *execdriver.Pipes) error {
+	var term execdriver.Terminal
+	var err error
+
+	if processConfig.Tty {
+		rootuid, err := container.HostUID()
+		if err != nil {
+			return err
+		}
+		cons, err := p.NewConsole(rootuid)
+		if err != nil {
+			return err
+		}
+		term, err = NewTtyConsole(cons, pipes, rootuid)
+	} else {
+		p.Stdout = pipes.Stdout
+		p.Stderr = pipes.Stderr
+		r, w, err := os.Pipe()
+		if err != nil {
+			return err
+		}
+		if pipes.Stdin != nil {
+			go func() {
+				io.Copy(w, pipes.Stdin)
+				w.Close()
+			}()
+			p.Stdin = r
+		}
+		term = &execdriver.StdConsole{}
+	}
+	if err != nil {
+		return err
+	}
+	processConfig.Terminal = term
+	return nil
 }

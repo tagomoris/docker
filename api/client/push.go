@@ -13,14 +13,12 @@ import (
 //
 // Usage: docker push NAME[:TAG]
 func (cli *DockerCli) CmdPush(args ...string) error {
-	cmd := cli.Subcmd("push", "NAME[:TAG]", "Push an image or a repository to the registry", true)
+	cmd := cli.Subcmd("push", []string{"NAME[:TAG]"}, "Push an image or a repository to the registry", true)
 	cmd.Require(flag.Exact, 1)
 
 	cmd.ParseFlags(args, true)
 
 	name := cmd.Arg(0)
-
-	cli.LoadConfigFile()
 
 	remote, tag := parsers.ParseRepositoryTag(name)
 
@@ -30,7 +28,7 @@ func (cli *DockerCli) CmdPush(args ...string) error {
 		return err
 	}
 	// Resolve the Auth config relevant for this server
-	authConfig := cli.configFile.ResolveAuthConfig(repoInfo.Index)
+	authConfig := registry.ResolveAuthConfig(cli.configFile, repoInfo.Index)
 	// If we're not using a custom registry, we know the restrictions
 	// applied to repository names and can warn the user in advance.
 	// Custom repositories can have different rules, and we must also

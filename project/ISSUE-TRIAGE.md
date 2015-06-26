@@ -1,4 +1,4 @@
-Triaging of issue
+Triaging of issues
 ------------------
 
 Triage provides an important way to contribute to an open source project.  Triage helps ensure issues resolve quickly by:  
@@ -9,7 +9,7 @@ Triage provides an important way to contribute to an open source project.  Triag
 
 - Lowering the issue count by preventing duplicate issues.
 
-- Streamling the development process by preventing duplicate discussions.
+- Streamlining the development process by preventing duplicate discussions.
 
 If you don't have time to code, consider helping with triage. The community will thank you for saving them time by spending some of yours.
 
@@ -22,7 +22,7 @@ Before triaging an issue very far, make sure that the issue's author provided th
 -   the output of `uname -a`
 -   a reproducible case if this is a bug, Dockerfiles FTW
 -   host distribution and version ( ubuntu 14.04, RHEL, fedora 21 )
--   page URL if this is a docs issue
+-   page URL if this is a docs issue or the name of a man page 
 
 Depending on the issue, you might not feel all this information is needed. Use your best judgement.  If you cannot triage an issue using what its author provided, explain kindly to the author that they must provide the above information to clarify the problem. 
 

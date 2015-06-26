@@ -23,8 +23,19 @@ if ! command -v zgrep &> /dev/null; then
 	}
 fi
 
+kernelVersion="$(uname -r)"
+kernelMajor="${kernelVersion%%.*}"
+kernelMinor="${kernelVersion#$kernelMajor.}"
+kernelMinor="${kernelMinor%%.*}"
+
 is_set() {
 	zgrep "CONFIG_$1=[y|m]" "$CONFIG" > /dev/null
+}
+is_set_in_kernel() {
+	zgrep "CONFIG_$1=y" "$CONFIG" > /dev/null
+}
+is_set_as_module() {
+	zgrep "CONFIG_$1=m" "$CONFIG" > /dev/null
 }
 
 # see https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
@@ -70,8 +81,10 @@ wrap_warning() {
 }
 
 check_flag() {
-	if is_set "$1"; then
+	if is_set_in_kernel "$1"; then
 		wrap_good "CONFIG_$1" 'enabled'
+	elif is_set_as_module "$1"; then
+		wrap_good "CONFIG_$1" 'enabled (as module)'
 	else
 		wrap_bad "CONFIG_$1" 'missing'
 	fi
@@ -81,6 +94,22 @@ check_flags() {
 	for flag in "$@"; do
 		echo "- $(check_flag "$flag")"
 	done
+}
+
+check_command() {
+	if command -v "$1" >/dev/null 2>&1; then
+		wrap_good "$1 command" 'available'
+	else
+		wrap_bad "$1 command" 'missing'
+	fi
+}
+
+check_device() {
+	if [ -c "$1" ]; then
+		wrap_good "$1" 'present'
+	else
+		wrap_bad "$1" 'missing'
+	fi
 }
 
 if [ ! -e "$CONFIG" ]; then
@@ -139,7 +168,7 @@ flags=(
 	NAMESPACES {NET,PID,IPC,UTS}_NS
 	DEVPTS_MULTIPLE_INSTANCES
 	CGROUPS CGROUP_CPUACCT CGROUP_DEVICE CGROUP_FREEZER CGROUP_SCHED CPUSETS
-	MACVLAN VETH BRIDGE
+	MACVLAN VETH BRIDGE BRIDGE_NETFILTER
 	NF_NAT_IPV4 IP_NF_FILTER IP_NF_TARGET_MASQUERADE
 	NETFILTER_XT_MATCH_{ADDRTYPE,CONNTRACK}
 	NF_NAT NF_NAT_NEEDED
@@ -158,8 +187,14 @@ echo 'Optional Features:'
 		echo "    $(wrap_color '(note that cgroup swap accounting is not enabled in your kernel config, you can enable it by setting boot option "swapaccount=1")' bold black)"
 	fi
 }
+
+if [ "$kernelMajor" -lt 3 ] || [ "$kernelMajor" -eq 3 -a "$kernelMinor" -le 18 ]; then
+	check_flags RESOURCE_COUNTERS
+fi
+
 flags=(
-	RESOURCE_COUNTERS
+	BLK_CGROUP
+	IOSCHED_CFQ
 	CGROUP_PERF
 	CFS_BANDWIDTH
 )
@@ -182,6 +217,11 @@ echo '- Storage Drivers:'
 
 	echo '- "'$(wrap_color 'overlay' blue)'":'
 	check_flags OVERLAY_FS EXT4_FS_SECURITY EXT4_FS_POSIX_ACL | sed 's/^/  /'
+
+	echo '- "'$(wrap_color 'zfs' blue)'":'
+	echo "  - $(check_device /dev/zfs)"
+	echo "  - $(check_command zfs)"
+	echo "  - $(check_command zpool)"
 } | sed 's/^/  /'
 echo
 

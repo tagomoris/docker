@@ -2,27 +2,33 @@ package builder
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/builder/parser"
+	"github.com/docker/docker/cliconfig"
 	"github.com/docker/docker/daemon"
-	"github.com/docker/docker/engine"
-	"github.com/docker/docker/graph"
+	"github.com/docker/docker/graph/tags"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/httputils"
 	"github.com/docker/docker/pkg/parsers"
+	"github.com/docker/docker/pkg/progressreader"
 	"github.com/docker/docker/pkg/streamformatter"
 	"github.com/docker/docker/pkg/urlutil"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
+	"github.com/docker/docker/utils"
 )
+
+// When downloading remote contexts, limit the amount (in bytes)
+// to be read from the response body in order to detect its Content-Type
+const maxPreambleLength = 100
 
 // whitelist of commands allowed for a commit/import
 var validCommitCommands = map[string]bool{
@@ -36,128 +42,163 @@ var validCommitCommands = map[string]bool{
 	"onbuild":    true,
 }
 
-type BuilderJob struct {
-	Engine *engine.Engine
-	Daemon *daemon.Daemon
+type Config struct {
+	DockerfileName string
+	RemoteURL      string
+	RepoName       string
+	SuppressOutput bool
+	NoCache        bool
+	Remove         bool
+	ForceRemove    bool
+	Pull           bool
+	Memory         int64
+	MemorySwap     int64
+	CpuShares      int64
+	CpuPeriod      int64
+	CpuQuota       int64
+	CpuSetCpus     string
+	CpuSetMems     string
+	CgroupParent   string
+	AuthConfigs    map[string]cliconfig.AuthConfig
+
+	Stdout  io.Writer
+	Context io.ReadCloser
+	// When closed, the job has been cancelled.
+	// Note: not all jobs implement cancellation.
+	// See Job.Cancel() and Job.WaitCancelled()
+	cancelled  chan struct{}
+	cancelOnce sync.Once
 }
 
-func (b *BuilderJob) Install() {
-	b.Engine.Register("build", b.CmdBuild)
-	b.Engine.Register("build_config", b.CmdBuildConfig)
+// When called, causes the Job.WaitCancelled channel to unblock.
+func (b *Config) Cancel() {
+	b.cancelOnce.Do(func() {
+		close(b.cancelled)
+	})
 }
 
-func (b *BuilderJob) CmdBuild(job *engine.Job) error {
-	if len(job.Args) != 0 {
-		return fmt.Errorf("Usage: %s\n", job.Name)
+// Returns a channel which is closed ("never blocks") when the job is cancelled.
+func (b *Config) WaitCancelled() <-chan struct{} {
+	return b.cancelled
+}
+
+func NewBuildConfig() *Config {
+	return &Config{
+		AuthConfigs: map[string]cliconfig.AuthConfig{},
+		cancelled:   make(chan struct{}),
 	}
+}
+
+func Build(d *daemon.Daemon, buildConfig *Config) error {
 	var (
-		dockerfileName = job.Getenv("dockerfile")
-		remoteURL      = job.Getenv("remote")
-		repoName       = job.Getenv("t")
-		suppressOutput = job.GetenvBool("q")
-		noCache        = job.GetenvBool("nocache")
-		rm             = job.GetenvBool("rm")
-		forceRm        = job.GetenvBool("forcerm")
-		pull           = job.GetenvBool("pull")
-		memory         = job.GetenvInt64("memory")
-		memorySwap     = job.GetenvInt64("memswap")
-		cpuShares      = job.GetenvInt64("cpushares")
-		cpuSetCpus     = job.Getenv("cpusetcpus")
-		cpuSetMems     = job.Getenv("cpusetmems")
-		authConfig     = &registry.AuthConfig{}
-		configFile     = &registry.ConfigFile{}
-		tag            string
-		context        io.ReadCloser
+		repoName string
+		tag      string
+		context  io.ReadCloser
 	)
+	sf := streamformatter.NewJSONStreamFormatter()
 
-	job.GetenvJson("authConfig", authConfig)
-	job.GetenvJson("configFile", configFile)
-
-	repoName, tag = parsers.ParseRepositoryTag(repoName)
+	repoName, tag = parsers.ParseRepositoryTag(buildConfig.RepoName)
 	if repoName != "" {
 		if err := registry.ValidateRepositoryName(repoName); err != nil {
 			return err
 		}
 		if len(tag) > 0 {
-			if err := graph.ValidateTagName(tag); err != nil {
+			if err := tags.ValidateTagName(tag); err != nil {
 				return err
 			}
 		}
 	}
 
-	if remoteURL == "" {
-		context = ioutil.NopCloser(job.Stdin)
-	} else if urlutil.IsGitURL(remoteURL) {
-		if !urlutil.IsGitTransport(remoteURL) {
-			remoteURL = "https://" + remoteURL
-		}
-		root, err := ioutil.TempDir("", "docker-build-git")
+	if buildConfig.RemoteURL == "" {
+		context = ioutil.NopCloser(buildConfig.Context)
+	} else if urlutil.IsGitURL(buildConfig.RemoteURL) {
+		root, err := utils.GitClone(buildConfig.RemoteURL)
 		if err != nil {
 			return err
 		}
 		defer os.RemoveAll(root)
-
-		if output, err := exec.Command("git", "clone", "--recursive", remoteURL, root).CombinedOutput(); err != nil {
-			return fmt.Errorf("Error trying to use git: %s (%s)", err, output)
-		}
 
 		c, err := archive.Tar(root, archive.Uncompressed)
 		if err != nil {
 			return err
 		}
 		context = c
-	} else if urlutil.IsURL(remoteURL) {
-		f, err := httputils.Download(remoteURL)
+	} else if urlutil.IsURL(buildConfig.RemoteURL) {
+		f, err := httputils.Download(buildConfig.RemoteURL)
 		if err != nil {
-			return err
+			return fmt.Errorf("Error downloading remote context %s: %v", buildConfig.RemoteURL, err)
 		}
 		defer f.Body.Close()
-		dockerFile, err := ioutil.ReadAll(f.Body)
-		if err != nil {
-			return err
-		}
+		ct := f.Header.Get("Content-Type")
+		clen := int(f.ContentLength)
+		contentType, bodyReader, err := inspectResponse(ct, f.Body, clen)
 
-		// When we're downloading just a Dockerfile put it in
-		// the default name - don't allow the client to move/specify it
-		dockerfileName = api.DefaultDockerfileName
+		defer bodyReader.Close()
 
-		c, err := archive.Generate(dockerfileName, string(dockerFile))
 		if err != nil {
-			return err
+			return fmt.Errorf("Error detecting content type for remote %s: %v", buildConfig.RemoteURL, err)
 		}
-		context = c
+		if contentType == httputils.MimeTypes.TextPlain {
+			dockerFile, err := ioutil.ReadAll(bodyReader)
+			if err != nil {
+				return err
+			}
+
+			// When we're downloading just a Dockerfile put it in
+			// the default name - don't allow the client to move/specify it
+			buildConfig.DockerfileName = api.DefaultDockerfileName
+
+			c, err := archive.Generate(buildConfig.DockerfileName, string(dockerFile))
+			if err != nil {
+				return err
+			}
+			context = c
+		} else {
+			// Pass through - this is a pre-packaged context, presumably
+			// with a Dockerfile with the right name inside it.
+			prCfg := progressreader.Config{
+				In:        bodyReader,
+				Out:       buildConfig.Stdout,
+				Formatter: sf,
+				Size:      clen,
+				NewLines:  true,
+				ID:        "Downloading context",
+				Action:    buildConfig.RemoteURL,
+			}
+			context = progressreader.New(prCfg)
+		}
 	}
+
 	defer context.Close()
 
-	sf := streamformatter.NewStreamFormatter(job.GetenvBool("json"))
-
 	builder := &Builder{
-		Daemon: b.Daemon,
-		Engine: b.Engine,
+		Daemon: d,
 		OutStream: &streamformatter.StdoutFormater{
-			Writer:          job.Stdout,
+			Writer:          buildConfig.Stdout,
 			StreamFormatter: sf,
 		},
 		ErrStream: &streamformatter.StderrFormater{
-			Writer:          job.Stdout,
+			Writer:          buildConfig.Stdout,
 			StreamFormatter: sf,
 		},
-		Verbose:         !suppressOutput,
-		UtilizeCache:    !noCache,
-		Remove:          rm,
-		ForceRemove:     forceRm,
-		Pull:            pull,
-		OutOld:          job.Stdout,
+		Verbose:         !buildConfig.SuppressOutput,
+		UtilizeCache:    !buildConfig.NoCache,
+		Remove:          buildConfig.Remove,
+		ForceRemove:     buildConfig.ForceRemove,
+		Pull:            buildConfig.Pull,
+		OutOld:          buildConfig.Stdout,
 		StreamFormatter: sf,
-		AuthConfig:      authConfig,
-		AuthConfigFile:  configFile,
-		dockerfileName:  dockerfileName,
-		cpuShares:       cpuShares,
-		cpuSetCpus:      cpuSetCpus,
-		cpuSetMems:      cpuSetMems,
-		memory:          memory,
-		memorySwap:      memorySwap,
-		cancelled:       job.WaitCancelled(),
+		AuthConfigs:     buildConfig.AuthConfigs,
+		dockerfileName:  buildConfig.DockerfileName,
+		cpuShares:       buildConfig.CpuShares,
+		cpuPeriod:       buildConfig.CpuPeriod,
+		cpuQuota:        buildConfig.CpuQuota,
+		cpuSetCpus:      buildConfig.CpuSetCpus,
+		cpuSetMems:      buildConfig.CpuSetMems,
+		cgroupParent:    buildConfig.CgroupParent,
+		memory:          buildConfig.Memory,
+		memorySwap:      buildConfig.MemorySwap,
+		cancelled:       buildConfig.WaitCancelled(),
 	}
 
 	id, err := builder.Run(context)
@@ -166,41 +207,27 @@ func (b *BuilderJob) CmdBuild(job *engine.Job) error {
 	}
 
 	if repoName != "" {
-		b.Daemon.Repositories().Tag(repoName, tag, id, true)
+		return d.Repositories().Tag(repoName, tag, id, true)
 	}
 	return nil
 }
 
-func (b *BuilderJob) CmdBuildConfig(job *engine.Job) error {
-	if len(job.Args) != 0 {
-		return fmt.Errorf("Usage: %s\n", job.Name)
-	}
-
-	var (
-		changes   = job.GetenvList("changes")
-		newConfig runconfig.Config
-	)
-
-	if err := job.GetenvJson("config", &newConfig); err != nil {
-		return err
-	}
-
+func BuildFromConfig(d *daemon.Daemon, c *runconfig.Config, changes []string) (*runconfig.Config, error) {
 	ast, err := parser.Parse(bytes.NewBufferString(strings.Join(changes, "\n")))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// ensure that the commands are valid
 	for _, n := range ast.Children {
 		if !validCommitCommands[n.Value] {
-			return fmt.Errorf("%s is not a valid change command", n.Value)
+			return nil, fmt.Errorf("%s is not a valid change command", n.Value)
 		}
 	}
 
 	builder := &Builder{
-		Daemon:        b.Daemon,
-		Engine:        b.Engine,
-		Config:        &newConfig,
+		Daemon:        d,
+		Config:        c,
 		OutStream:     ioutil.Discard,
 		ErrStream:     ioutil.Discard,
 		disableCommit: true,
@@ -208,12 +235,81 @@ func (b *BuilderJob) CmdBuildConfig(job *engine.Job) error {
 
 	for i, n := range ast.Children {
 		if err := builder.dispatch(i, n); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	if err := json.NewEncoder(job.Stdout).Encode(builder.Config); err != nil {
-		return err
+	return builder.Config, nil
+}
+
+func Commit(d *daemon.Daemon, name string, c *daemon.ContainerCommitConfig) (string, error) {
+	container, err := d.Get(name)
+	if err != nil {
+		return "", err
 	}
-	return nil
+
+	if c.Config == nil {
+		c.Config = &runconfig.Config{}
+	}
+
+	newConfig, err := BuildFromConfig(d, c.Config, c.Changes)
+	if err != nil {
+		return "", err
+	}
+
+	if err := runconfig.Merge(newConfig, container.Config); err != nil {
+		return "", err
+	}
+
+	img, err := d.Commit(container, c.Repo, c.Tag, c.Comment, c.Author, c.Pause, newConfig)
+	if err != nil {
+		return "", err
+	}
+
+	return img.ID, nil
+}
+
+// inspectResponse looks into the http response data at r to determine whether its
+// content-type is on the list of acceptable content types for remote build contexts.
+// This function returns:
+//    - a string representation of the detected content-type
+//    - an io.Reader for the response body
+//    - an error value which will be non-nil either when something goes wrong while
+//      reading bytes from r or when the detected content-type is not acceptable.
+func inspectResponse(ct string, r io.ReadCloser, clen int) (string, io.ReadCloser, error) {
+	plen := clen
+	if plen <= 0 || plen > maxPreambleLength {
+		plen = maxPreambleLength
+	}
+
+	preamble := make([]byte, plen, plen)
+	rlen, err := r.Read(preamble)
+	if rlen == 0 {
+		return ct, r, errors.New("Empty response")
+	}
+	if err != nil && err != io.EOF {
+		return ct, r, err
+	}
+
+	preambleR := bytes.NewReader(preamble)
+	bodyReader := ioutil.NopCloser(io.MultiReader(preambleR, r))
+	// Some web servers will use application/octet-stream as the default
+	// content type for files without an extension (e.g. 'Dockerfile')
+	// so if we receive this value we better check for text content
+	contentType := ct
+	if len(ct) == 0 || ct == httputils.MimeTypes.OctetStream {
+		contentType, _, err = httputils.DetectContentType(preamble)
+		if err != nil {
+			return contentType, bodyReader, err
+		}
+	}
+
+	contentType = selectAcceptableMIME(contentType)
+	var cterr error
+	if len(contentType) == 0 {
+		cterr = fmt.Errorf("unsupported Content-Type %q", ct)
+		contentType = ct
+	}
+
+	return contentType, bodyReader, cterr
 }

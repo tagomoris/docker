@@ -167,6 +167,10 @@ func (d *Driver) Status() [][2]string {
 	}
 }
 
+func (d *Driver) GetMetadata(id string) (map[string]string, error) {
+	return nil, nil
+}
+
 func (d *Driver) Cleanup() error {
 	return nil
 }
@@ -318,6 +322,14 @@ func (d *Driver) Put(id string) error {
 	mount := d.active[id]
 	if mount == nil {
 		logrus.Debugf("Put on a non-mounted device %s", id)
+		// but it might be still here
+		if d.Exists(id) {
+			mergedDir := path.Join(d.dir(id), "merged")
+			err := syscall.Unmount(mergedDir, 0)
+			if err != nil {
+				logrus.Debugf("Failed to unmount %s overlay: %v", id, err)
+			}
+		}
 		return nil
 	}
 

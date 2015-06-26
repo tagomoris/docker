@@ -3,7 +3,8 @@ package namesgenerator
 import (
 	"fmt"
 	"math/rand"
-	"time"
+
+	"github.com/docker/docker/pkg/random"
 )
 
 var (
@@ -107,11 +108,17 @@ var (
 		// Niels Bohr is the father of quantum theory. https://en.wikipedia.org/wiki/Niels_Bohr.
 		"bohr",
 
+		// Satyendra Nath Bose - He provided the foundation for Bose–Einstein statistics and the theory of the Bose–Einstein condensate. - https://en.wikipedia.org/wiki/Satyendra_Nath_Bose
+		"bose",
+
 		// Emmett Brown invented time travel. https://en.wikipedia.org/wiki/Emmett_Brown (thanks Brian Goff)
 		"brown",
 
 		// Rachel Carson - American marine biologist and conservationist, her book Silent Spring and other writings are credited with advancing the global environmental movement. https://en.wikipedia.org/wiki/Rachel_Carson
 		"carson",
+
+		//Subrahmanyan Chandrasekhar - Astrophysicist known for his mathematical theory on different stages and evolution in structures of the stars. He has won nobel prize for physics - https://en.wikipedia.org/wiki/Subrahmanyan_Chandrasekhar
+		"chandrasekhar",
 
 		// Jane Colden - American botanist widely considered the first female American botanist - https://en.wikipedia.org/wiki/Jane_Colden
 		"colden",
@@ -194,6 +201,9 @@ var (
 		"kilby",
 		"noyce",
 
+		// Har Gobind Khorana - Indian-American biochemist who shared the 1968 Nobel Prize for Physiology - https://en.wikipedia.org/wiki/Har_Gobind_Khorana
+		"khorana",
+
 		// Maria Kirch - German astronomer and first woman to discover a comet - https://en.wikipedia.org/wiki/Maria_Margarethe_Kirch
 		"kirch",
 
@@ -263,6 +273,12 @@ var (
 		// Claudius Ptolemy - a Greco-Egyptian writer of Alexandria, known as a mathematician, astronomer, geographer, astrologer, and poet of a single epigram in the Greek Anthology - https://en.wikipedia.org/wiki/Ptolemy
 		"ptolemy",
 
+		// C. V. Raman - Indian physicist who won the Nobel Prize in 1930 for proposing the Raman effect. - https://en.wikipedia.org/wiki/C._V._Raman
+		"raman",
+
+		// Srinivasa Ramanujan - Indian mathematician and autodidact who made extraordinary contributions to mathematical analysis, number theory, infinite series, and continued fractions. - https://en.wikipedia.org/wiki/Srinivasa_Ramanujan
+		"ramanujan",
+
 		// Dennis Ritchie and Ken Thompson created UNIX and the C programming language.
 		// - https://en.wikipedia.org/wiki/Dennis_Ritchie
 		// - https://en.wikipedia.org/wiki/Ken_Thompson
@@ -271,6 +287,9 @@ var (
 
 		// Rosalind Franklin - British biophysicist and X-ray crystallographer whose research was critical to the understanding of DNA - https://en.wikipedia.org/wiki/Rosalind_Franklin
 		"rosalind",
+
+		// Meghnad Saha - Indian astrophysicist best known for his development of the Saha equation, used to describe chemical and physical conditions in stars - https://en.wikipedia.org/wiki/Meghnad_Saha
+		"saha",
 
 		// Jean E. Sammet developed FORMAC, the first widely used computer language for symbolic manipulation of mathematical formulas. https://en.wikipedia.org/wiki/Jean_E._Sammet
 		"sammet",
@@ -309,7 +328,7 @@ var (
 		"yonath",
 	}
 
-	rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+	rnd = rand.New(random.NewSource())
 )
 
 func GetRandomName(retry int) string {

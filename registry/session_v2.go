@@ -27,7 +27,7 @@ func getV2Builder(e *Endpoint) *v2.URLBuilder {
 func (r *Session) V2RegistryEndpoint(index *IndexInfo) (ep *Endpoint, err error) {
 	// TODO check if should use Mirror
 	if index.Official {
-		ep, err = newEndpoint(REGISTRYSERVER, true)
+		ep, err = newEndpoint(REGISTRYSERVER, true, nil)
 		if err != nil {
 			return
 		}
@@ -38,7 +38,7 @@ func (r *Session) V2RegistryEndpoint(index *IndexInfo) (ep *Endpoint, err error)
 	} else if r.indexEndpoint.String() == index.GetAuthConfigKey() {
 		ep = r.indexEndpoint
 	} else {
-		ep, err = NewEndpoint(index)
+		ep, err = NewEndpoint(index, nil)
 		if err != nil {
 			return
 		}
@@ -49,7 +49,7 @@ func (r *Session) V2RegistryEndpoint(index *IndexInfo) (ep *Endpoint, err error)
 }
 
 // GetV2Authorization gets the authorization needed to the given image
-// If readonly access is requested, then only the authorization may
+// If readonly access is requested, then the authorization may
 // only be used for Get operations.
 func (r *Session) GetV2Authorization(ep *Endpoint, imageName string, readOnly bool) (auth *RequestAuthorization, err error) {
 	scopes := []string{"pull"}
@@ -68,42 +68,61 @@ func (r *Session) GetV2Authorization(ep *Endpoint, imageName string, readOnly bo
 //  1.c) if anything else, err
 // 2) PUT the created/signed manifest
 //
-func (r *Session) GetV2ImageManifest(ep *Endpoint, imageName, tagName string, auth *RequestAuthorization) ([]byte, string, error) {
+
+// GetV2ImageManifest simply fetches the bytes of a manifest and the remote
+// digest, if available in the request. Note that the application shouldn't
+// rely on the untrusted remoteDigest, and should also verify against a
+// locally provided digest, if applicable.
+func (r *Session) GetV2ImageManifest(ep *Endpoint, imageName, tagName string, auth *RequestAuthorization) (remoteDigest digest.Digest, p []byte, err error) {
 	routeURL, err := getV2Builder(ep).BuildManifestURL(imageName, tagName)
 	if err != nil {
-		return nil, "", err
+		return "", nil, err
 	}
 
 	method := "GET"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
 
-	req, err := r.reqFactory.NewRequest(method, routeURL, nil)
+	req, err := http.NewRequest(method, routeURL, nil)
 	if err != nil {
-		return nil, "", err
+		return "", nil, err
 	}
+
 	if err := auth.Authorize(req); err != nil {
-		return nil, "", err
+		return "", nil, err
 	}
-	res, _, err := r.doRequest(req)
+
+	res, err := r.client.Do(req)
 	if err != nil {
-		return nil, "", err
+		return "", nil, err
 	}
 	defer res.Body.Close()
+
 	if res.StatusCode != 200 {
 		if res.StatusCode == 401 {
-			return nil, "", errLoginRequired
+			return "", nil, errLoginRequired
 		} else if res.StatusCode == 404 {
-			return nil, "", ErrDoesNotExist
+			return "", nil, ErrDoesNotExist
 		}
-		return nil, "", httputils.NewHTTPRequestError(fmt.Sprintf("Server error: %d trying to fetch for %s:%s", res.StatusCode, imageName, tagName), res)
+		return "", nil, httputils.NewHTTPRequestError(fmt.Sprintf("Server error: %d trying to fetch for %s:%s", res.StatusCode, imageName, tagName), res)
 	}
 
-	manifestBytes, err := ioutil.ReadAll(res.Body)
+	p, err = ioutil.ReadAll(res.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("Error while reading the http response: %s", err)
+		return "", nil, fmt.Errorf("Error while reading the http response: %s", err)
 	}
 
-	return manifestBytes, res.Header.Get(DockerDigestHeader), nil
+	dgstHdr := res.Header.Get(DockerDigestHeader)
+	if dgstHdr != "" {
+		remoteDigest, err = digest.ParseDigest(dgstHdr)
+		if err != nil {
+			// NOTE(stevvooe): Including the remote digest is optional. We
+			// don't need to verify against it, but it is good practice.
+			remoteDigest = ""
+			logrus.Debugf("error parsing remote digest when fetching %v: %v", routeURL, err)
+		}
+	}
+
+	return
 }
 
 // - Succeeded to head image blob (already exists)
@@ -118,14 +137,14 @@ func (r *Session) HeadV2ImageBlob(ep *Endpoint, imageName string, dgst digest.Di
 	method := "HEAD"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
 
-	req, err := r.reqFactory.NewRequest(method, routeURL, nil)
+	req, err := http.NewRequest(method, routeURL, nil)
 	if err != nil {
 		return false, err
 	}
 	if err := auth.Authorize(req); err != nil {
 		return false, err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -152,14 +171,14 @@ func (r *Session) GetV2ImageBlob(ep *Endpoint, imageName string, dgst digest.Dig
 
 	method := "GET"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
-	req, err := r.reqFactory.NewRequest(method, routeURL, nil)
+	req, err := http.NewRequest(method, routeURL, nil)
 	if err != nil {
 		return err
 	}
 	if err := auth.Authorize(req); err != nil {
 		return err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -183,14 +202,14 @@ func (r *Session) GetV2ImageBlobReader(ep *Endpoint, imageName string, dgst dige
 
 	method := "GET"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
-	req, err := r.reqFactory.NewRequest(method, routeURL, nil)
+	req, err := http.NewRequest(method, routeURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	if err := auth.Authorize(req); err != nil {
 		return nil, 0, err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -220,7 +239,7 @@ func (r *Session) PutV2ImageBlob(ep *Endpoint, imageName string, dgst digest.Dig
 
 	method := "PUT"
 	logrus.Debugf("[registry] Calling %q %s", method, location)
-	req, err := r.reqFactory.NewRequest(method, location, ioutil.NopCloser(blobRdr))
+	req, err := http.NewRequest(method, location, ioutil.NopCloser(blobRdr))
 	if err != nil {
 		return err
 	}
@@ -230,7 +249,7 @@ func (r *Session) PutV2ImageBlob(ep *Endpoint, imageName string, dgst digest.Dig
 	if err := auth.Authorize(req); err != nil {
 		return err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -259,7 +278,7 @@ func (r *Session) initiateBlobUpload(ep *Endpoint, imageName string, auth *Reque
 	}
 
 	logrus.Debugf("[registry] Calling %q %s", "POST", routeURL)
-	req, err := r.reqFactory.NewRequest("POST", routeURL, nil)
+	req, err := http.NewRequest("POST", routeURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -267,7 +286,7 @@ func (r *Session) initiateBlobUpload(ep *Endpoint, imageName string, auth *Reque
 	if err := auth.Authorize(req); err != nil {
 		return "", err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -305,14 +324,14 @@ func (r *Session) PutV2ImageManifest(ep *Endpoint, imageName, tagName string, si
 
 	method := "PUT"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
-	req, err := r.reqFactory.NewRequest(method, routeURL, bytes.NewReader(signedManifest))
+	req, err := http.NewRequest(method, routeURL, bytes.NewReader(signedManifest))
 	if err != nil {
 		return "", err
 	}
 	if err := auth.Authorize(req); err != nil {
 		return "", err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -366,14 +385,14 @@ func (r *Session) GetV2RemoteTags(ep *Endpoint, imageName string, auth *RequestA
 	method := "GET"
 	logrus.Debugf("[registry] Calling %q %s", method, routeURL)
 
-	req, err := r.reqFactory.NewRequest(method, routeURL, nil)
+	req, err := http.NewRequest(method, routeURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := auth.Authorize(req); err != nil {
 		return nil, err
 	}
-	res, _, err := r.doRequest(req)
+	res, err := r.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -387,10 +406,8 @@ func (r *Session) GetV2RemoteTags(ep *Endpoint, imageName string, auth *RequestA
 		return nil, httputils.NewHTTPRequestError(fmt.Sprintf("Server error: %d trying to fetch for %s", res.StatusCode, imageName), res)
 	}
 
-	decoder := json.NewDecoder(res.Body)
 	var remote remoteTags
-	err = decoder.Decode(&remote)
-	if err != nil {
+	if err := json.NewDecoder(res.Body).Decode(&remote); err != nil {
 		return nil, fmt.Errorf("Error while decoding the http response: %s", err)
 	}
 	return remote.Tags, nil

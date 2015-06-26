@@ -1,3 +1,5 @@
+// +build linux
+
 package lxc
 
 import (
@@ -14,22 +16,7 @@ import (
 )
 
 const LxcTemplate = `
-{{if .Network.Interface}}
-# network configuration
-lxc.network.type = veth
-lxc.network.link = {{.Network.Interface.Bridge}}
-lxc.network.name = eth0
-lxc.network.mtu = {{.Network.Mtu}}
-lxc.network.flags = up
-{{else if .Network.HostNetworking}}
 lxc.network.type = none
-{{else}}
-# network is disabled (-n=false)
-lxc.network.type = empty
-lxc.network.flags = up
-lxc.network.mtu = {{.Network.Mtu}}
-{{end}}
-
 # root filesystem
 {{$ROOTFS := .Rootfs}}
 lxc.rootfs = {{$ROOTFS}}
@@ -59,6 +46,9 @@ lxc.cgroup.devices.allow = {{$allowedDevice.CgroupString}}
 # Use mnt.putold as per https://bugs.launchpad.net/ubuntu/+source/lxc/+bug/986385
 lxc.pivotdir = lxc_putold
 
+# lxc.autodev is not compatible with lxc --device switch
+lxc.autodev = 0
+
 # NOTICE: These mounts must be applied within the namespace
 {{if .ProcessConfig.Privileged}}
 # WARNING: mounting procfs and/or sysfs read-write is a known attack vector.
@@ -80,11 +70,11 @@ lxc.aa_profile = {{.AppArmorProfile}}
 {{end}}
 
 {{if .ProcessConfig.Tty}}
-lxc.mount.entry = {{.ProcessConfig.Console}} {{escapeFstabSpaces $ROOTFS}}/dev/console none bind,rw 0 0
+lxc.mount.entry = {{.ProcessConfig.Console}} {{escapeFstabSpaces $ROOTFS}}/dev/console none bind,rw,create=file 0 0
 {{end}}
 
-lxc.mount.entry = devpts {{escapeFstabSpaces $ROOTFS}}/dev/pts devpts {{formatMountLabel "newinstance,ptmxmode=0666,nosuid,noexec" ""}} 0 0
-lxc.mount.entry = shm {{escapeFstabSpaces $ROOTFS}}/dev/shm tmpfs {{formatMountLabel "size=65536k,nosuid,nodev,noexec" ""}} 0 0
+lxc.mount.entry = devpts {{escapeFstabSpaces $ROOTFS}}/dev/pts devpts {{formatMountLabel "newinstance,ptmxmode=0666,nosuid,noexec,create=dir" ""}} 0 0
+lxc.mount.entry = shm {{escapeFstabSpaces $ROOTFS}}/dev/shm tmpfs {{formatMountLabel "size=65536k,nosuid,nodev,noexec,create=dir" ""}} 0 0
 
 {{range $value := .Mounts}}
 {{$createVal := isDirectory $value.Source}}
@@ -107,11 +97,23 @@ lxc.cgroup.memory.memsw.limit_in_bytes = {{$memSwap}}
 {{if .Resources.CpuShares}}
 lxc.cgroup.cpu.shares = {{.Resources.CpuShares}}
 {{end}}
+{{if .Resources.CpuPeriod}}
+lxc.cgroup.cpu.cfs_period_us = {{.Resources.CpuPeriod}}
+{{end}}
 {{if .Resources.CpusetCpus}}
 lxc.cgroup.cpuset.cpus = {{.Resources.CpusetCpus}}
 {{end}}
 {{if .Resources.CpusetMems}}
 lxc.cgroup.cpuset.mems = {{.Resources.CpusetMems}}
+{{end}}
+{{if .Resources.CpuQuota}}
+lxc.cgroup.cpu.cfs_quota_us = {{.Resources.CpuQuota}}
+{{end}}
+{{if .Resources.BlkioWeight}}
+lxc.cgroup.blkio.weight = {{.Resources.BlkioWeight}}
+{{end}}
+{{if .Resources.OomKillDisable}}
+lxc.cgroup.memory.oom_control = {{.Resources.OomKillDisable}}
 {{end}}
 {{end}}
 
@@ -131,6 +133,7 @@ lxc.network.ipv4.gateway = {{.Network.Interface.Gateway}}
 {{if .Network.Interface.MacAddress}}
 lxc.network.hwaddr = {{.Network.Interface.MacAddress}}
 {{end}}
+{{end}}
 {{if .ProcessConfig.Env}}
 lxc.utsname = {{getHostname .ProcessConfig.Env}}
 {{end}}
@@ -149,7 +152,6 @@ lxc.cap.drop = {{.}}
 		{{end}}
 		{{end}}
 	{{end}}
-{{end}}
 {{end}}
 `
 

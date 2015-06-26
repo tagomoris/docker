@@ -1,12 +1,12 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -17,13 +17,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/pkg/stringutils"
-	"github.com/docker/docker/vendor/src/code.google.com/p/go/src/pkg/archive/tar"
 )
 
 func getExitCode(err error) (int, error) {
 	exitCode := 0
 	if exiterr, ok := err.(*exec.ExitError); ok {
-		if procExit := exiterr.Sys().(syscall.WaitStatus); ok {
+		if procExit, ok := exiterr.Sys().(syscall.WaitStatus); ok {
 			return procExit.ExitStatus(), nil
 		}
 	}
@@ -168,13 +167,8 @@ func runCommandPipelineWithOutput(cmds ...*exec.Cmd) (output string, exitCode in
 	return runCommandWithOutput(cmds[len(cmds)-1])
 }
 
-func logDone(message string) {
-	fmt.Printf("[PASSED]: %.69s\n", message)
-}
-
 func unmarshalJSON(data []byte, result interface{}) error {
-	err := json.Unmarshal(data, result)
-	if err != nil {
+	if err := json.Unmarshal(data, result); err != nil {
 		return err
 	}
 
@@ -280,35 +274,6 @@ type FileServer struct {
 	*httptest.Server
 }
 
-func fileServer(files map[string]string) (*FileServer, error) {
-	var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-		if filePath, found := files[r.URL.Path]; found {
-			http.ServeFile(w, r, filePath)
-		} else {
-			http.Error(w, http.StatusText(404), 404)
-		}
-	}
-
-	for _, file := range files {
-		if _, err := os.Stat(file); err != nil {
-			return nil, err
-		}
-	}
-	server := httptest.NewServer(handler)
-	return &FileServer{
-		Server: server,
-	}, nil
-}
-
-func copyWithCP(source, target string) error {
-	copyCmd := exec.Command("cp", "-rp", source, target)
-	out, exitCode, err := runCommandWithOutput(copyCmd)
-	if err != nil || exitCode != 0 {
-		return fmt.Errorf("failed to copy: error: %q ,output: %q", err, out)
-	}
-	return nil
-}
-
 // randomUnixTmpDirPath provides a temporary unix path with rand string appended.
 // does not create or checks if it exists.
 func randomUnixTmpDirPath(s string) string {
@@ -350,4 +315,27 @@ func parseCgroupPaths(procCgroupData string) map[string]string {
 		cgroupPaths[parts[1]] = parts[2]
 	}
 	return cgroupPaths
+}
+
+type channelBuffer struct {
+	c chan []byte
+}
+
+func (c *channelBuffer) Write(b []byte) (int, error) {
+	c.c <- b
+	return len(b), nil
+}
+
+func (c *channelBuffer) Close() error {
+	close(c.c)
+	return nil
+}
+
+func (c *channelBuffer) ReadTimeout(p []byte, n time.Duration) (int, error) {
+	select {
+	case b := <-c.c:
+		return copy(p[0:], b), nil
+	case <-time.After(n):
+		return -1, fmt.Errorf("timeout reading from channel")
+	}
 }

@@ -10,18 +10,21 @@ import (
 //
 // Usage: docker pause CONTAINER [CONTAINER...]
 func (cli *DockerCli) CmdPause(args ...string) error {
-	cmd := cli.Subcmd("pause", "CONTAINER [CONTAINER...]", "Pause all processes within a container", true)
+	cmd := cli.Subcmd("pause", []string{"CONTAINER [CONTAINER...]"}, "Pause all processes within a container", true)
 	cmd.Require(flag.Min, 1)
-	cmd.ParseFlags(args, false)
+	cmd.ParseFlags(args, true)
 
-	var encounteredError error
+	var errNames []string
 	for _, name := range cmd.Args() {
 		if _, _, err := readBody(cli.call("POST", fmt.Sprintf("/containers/%s/pause", name), nil, nil)); err != nil {
 			fmt.Fprintf(cli.err, "%s\n", err)
-			encounteredError = fmt.Errorf("Error: failed to pause container named %s", name)
+			errNames = append(errNames, name)
 		} else {
 			fmt.Fprintf(cli.out, "%s\n", name)
 		}
 	}
-	return encounteredError
+	if len(errNames) > 0 {
+		return fmt.Errorf("Error: failed to pause containers: %v", errNames)
+	}
+	return nil
 }

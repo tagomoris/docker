@@ -3,6 +3,7 @@ package logrus
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -18,9 +19,8 @@ const (
 )
 
 var (
-	baseTimestamp          time.Time
-	isTerminal             bool
-	defaultTimestampFormat = time.RFC3339
+	baseTimestamp time.Time
+	isTerminal    bool
 )
 
 func init() {
@@ -47,7 +47,7 @@ type TextFormatter struct {
 	// the time passed since beginning of execution.
 	FullTimestamp bool
 
-	// Timestamp format to use for display, if a full timestamp is printed
+	// TimestampFormat to use for display when a full timestamp is printed
 	TimestampFormat string
 
 	// The fields are sorted by default for a consistent output. For applications
@@ -70,10 +70,11 @@ func (f *TextFormatter) Format(entry *Entry) ([]byte, error) {
 
 	prefixFieldClashes(entry.Data)
 
-	isColored := (f.ForceColors || isTerminal) && !f.DisableColors
+	isColorTerminal := isTerminal && (runtime.GOOS != "windows")
+	isColored := (f.ForceColors || isColorTerminal) && !f.DisableColors
 
 	if f.TimestampFormat == "" {
-		f.TimestampFormat = defaultTimestampFormat
+		f.TimestampFormat = DefaultTimestampFormat
 	}
 	if isColored {
 		f.printColored(b, entry, keys)

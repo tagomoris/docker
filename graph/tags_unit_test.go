@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"archive/tar"
 	"bytes"
 	"io"
 	"os"
@@ -11,8 +12,8 @@ import (
 	"github.com/docker/docker/daemon/graphdriver"
 	_ "github.com/docker/docker/daemon/graphdriver/vfs" // import the vfs driver so it is used in the tests
 	"github.com/docker/docker/image"
+	"github.com/docker/docker/trust"
 	"github.com/docker/docker/utils"
-	"github.com/docker/docker/vendor/src/code.google.com/p/go/src/pkg/archive/tar"
 )
 
 const (
@@ -60,7 +61,18 @@ func mkTestTagStore(root string, t *testing.T) *TagStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewTagStore(path.Join(root, "tags"), graph, nil, nil, events.New())
+
+	trust, err := trust.NewTrustStore(root + "/trust")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tagCfg := &TagStoreConfig{
+		Graph:  graph,
+		Events: events.New(),
+		Trust:  trust,
+	}
+	store, err := NewTagStore(path.Join(root, "tags"), tagCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,24 +185,6 @@ func TestLookupImage(t *testing.T) {
 			t.Errorf("Expected 1 image, none found: %s", name)
 		} else if img.ID != testPrivateImageID {
 			t.Errorf("Expected ID '%s' found '%s'", testPrivateImageID, img.ID)
-		}
-	}
-}
-
-func TestValidTagName(t *testing.T) {
-	validTags := []string{"9", "foo", "foo-test", "bar.baz.boo"}
-	for _, tag := range validTags {
-		if err := ValidateTagName(tag); err != nil {
-			t.Errorf("'%s' should've been a valid tag", tag)
-		}
-	}
-}
-
-func TestInvalidTagName(t *testing.T) {
-	validTags := []string{"-9", ".foo", "-test", ".", "-"}
-	for _, tag := range validTags {
-		if err := ValidateTagName(tag); err == nil {
-			t.Errorf("'%s' shouldn't have been a valid tag", tag)
 		}
 	}
 }

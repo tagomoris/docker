@@ -3,16 +3,15 @@ package graph
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"os"
 	"testing"
 
+	"github.com/docker/distribution/digest"
 	"github.com/docker/docker/image"
-	"github.com/docker/docker/pkg/tarsum"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
+	"github.com/docker/libtrust"
 )
 
 const (
@@ -55,7 +54,7 @@ func (s *TagStore) newManifest(localName, remoteName, tag string) ([]byte, error
 		metadata = *layer.Config
 	}
 
-	for ; layer != nil; layer, err = layer.GetParent() {
+	for ; layer != nil; layer, err = s.graph.GetParent(layer) {
 		if err != nil {
 			return nil, err
 		}
@@ -70,40 +69,34 @@ func (s *TagStore) newManifest(localName, remoteName, tag string) ([]byte, error
 			}
 		}
 
-		checksum, err := layer.GetCheckSum(s.graph.ImageRoot(layer.ID))
-		if err != nil {
-			return nil, fmt.Errorf("Error getting image checksum: %s", err)
-		}
-		if tarsum.VersionLabelForChecksum(checksum) != tarsum.Version1.String() {
-			archive, err := layer.TarLayer()
+		dgst, err := s.graph.GetDigest(layer.ID)
+		if err == ErrDigestNotSet {
+			archive, err := s.graph.TarLayer(layer)
 			if err != nil {
 				return nil, err
 			}
 
 			defer archive.Close()
 
-			tarSum, err := tarsum.NewTarSum(archive, true, tarsum.Version1)
+			dgst, err = digest.FromReader(archive)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := io.Copy(ioutil.Discard, tarSum); err != nil {
-				return nil, err
-			}
-
-			checksum = tarSum.Sum(nil)
 
 			// Save checksum value
-			if err := layer.SaveCheckSum(s.graph.ImageRoot(layer.ID), checksum); err != nil {
+			if err := s.graph.SetDigest(layer.ID, dgst); err != nil {
 				return nil, err
 			}
+		} else if err != nil {
+			return nil, fmt.Errorf("Error getting image checksum: %s", err)
 		}
 
-		jsonData, err := layer.RawJson()
+		jsonData, err := s.graph.RawJSON(layer.ID)
 		if err != nil {
 			return nil, fmt.Errorf("Cannot retrieve the path for {%s}: %s", layer.ID, err)
 		}
 
-		manifest.FSLayers = append(manifest.FSLayers, &registry.FSLayer{BlobSum: checksum})
+		manifest.FSLayers = append(manifest.FSLayers, &registry.FSLayer{BlobSum: dgst.String()})
 
 		layersSeen[layer.ID] = true
 
@@ -139,10 +132,10 @@ func TestManifestTarsumCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cs, err := img.GetCheckSum(store.graph.ImageRoot(testManifestImageID)); err != nil {
-		t.Fatal(err)
-	} else if cs != "" {
+	if _, err := store.graph.GetDigest(testManifestImageID); err == nil {
 		t.Fatalf("Non-empty checksum file after register")
+	} else if err != ErrDigestNotSet {
+		t.Fatal(err)
 	}
 
 	// Generate manifest
@@ -151,7 +144,7 @@ func TestManifestTarsumCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manifestChecksum, err := img.GetCheckSum(store.graph.ImageRoot(testManifestImageID))
+	manifestChecksum, err := store.graph.GetDigest(testManifestImageID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +158,7 @@ func TestManifestTarsumCache(t *testing.T) {
 		t.Fatalf("Unexpected number of layers, expecting 1: %d", len(manifest.FSLayers))
 	}
 
-	if manifest.FSLayers[0].BlobSum != manifestChecksum {
+	if manifest.FSLayers[0].BlobSum != manifestChecksum.String() {
 		t.Fatalf("Unexpected blob sum, expecting %q, got %q", manifestChecksum, manifest.FSLayers[0].BlobSum)
 	}
 
@@ -173,11 +166,129 @@ func TestManifestTarsumCache(t *testing.T) {
 		t.Fatalf("Unexpected number of layer history, expecting 1: %d", len(manifest.History))
 	}
 
-	v1compat, err := img.RawJson()
+	v1compat, err := store.graph.RawJSON(img.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if manifest.History[0].V1Compatibility != string(v1compat) {
 		t.Fatalf("Unexpected json value\nExpected:\n%s\nActual:\n%s", v1compat, manifest.History[0].V1Compatibility)
+	}
+}
+
+// TestManifestDigestCheck ensures that loadManifest properly verifies the
+// remote and local digest.
+func TestManifestDigestCheck(t *testing.T) {
+	tmp, err := utils.TestDirectory("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmp)
+	store := mkTestTagStore(tmp, t)
+	defer store.graph.driver.Cleanup()
+
+	archive, err := fakeTar()
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := &image.Image{ID: testManifestImageID}
+	if err := store.graph.Register(img, archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Tag(testManifestImageName, testManifestTag, testManifestImageID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.graph.GetDigest(testManifestImageID); err == nil {
+		t.Fatalf("Non-empty checksum file after register")
+	} else if err != ErrDigestNotSet {
+		t.Fatal(err)
+	}
+
+	// Generate manifest
+	payload, err := store.newManifest(testManifestImageName, testManifestImageName, testManifestTag)
+	if err != nil {
+		t.Fatalf("unexpected error generating test manifest: %v", err)
+	}
+
+	pk, err := libtrust.GenerateECP256PrivateKey()
+	if err != nil {
+		t.Fatalf("unexpected error generating private key: %v", err)
+	}
+
+	sig, err := libtrust.NewJSONSignature(payload)
+	if err != nil {
+		t.Fatalf("error creating signature: %v", err)
+	}
+
+	if err := sig.Sign(pk); err != nil {
+		t.Fatalf("error signing manifest bytes: %v", err)
+	}
+
+	signedBytes, err := sig.PrettySignature("signatures")
+	if err != nil {
+		t.Fatalf("error getting signed bytes: %v", err)
+	}
+
+	dgst, err := digest.FromBytes(payload)
+	if err != nil {
+		t.Fatalf("error getting digest of manifest: %v", err)
+	}
+
+	// use this as the "bad" digest
+	zeroDigest, err := digest.FromBytes([]byte{})
+	if err != nil {
+		t.Fatalf("error making zero digest: %v", err)
+	}
+
+	// Remote and local match, everything should look good
+	local, _, _, err := store.loadManifest(signedBytes, dgst.String(), dgst)
+	if err != nil {
+		t.Fatalf("unexpected error verifying local and remote digest: %v", err)
+	}
+
+	if local != dgst {
+		t.Fatalf("local digest not correctly calculated: %v", err)
+	}
+
+	// remote and no local, since pulling by tag
+	local, _, _, err = store.loadManifest(signedBytes, "tag", dgst)
+	if err != nil {
+		t.Fatalf("unexpected error verifying tag pull and remote digest: %v", err)
+	}
+
+	if local != dgst {
+		t.Fatalf("local digest not correctly calculated: %v", err)
+	}
+
+	// remote and differing local, this is the most important to fail
+	local, _, _, err = store.loadManifest(signedBytes, zeroDigest.String(), dgst)
+	if err == nil {
+		t.Fatalf("error expected when verifying with differing local digest")
+	}
+
+	// no remote, no local (by tag)
+	local, _, _, err = store.loadManifest(signedBytes, "tag", "")
+	if err != nil {
+		t.Fatalf("unexpected error verifying manifest without remote digest: %v", err)
+	}
+
+	if local != dgst {
+		t.Fatalf("local digest not correctly calculated: %v", err)
+	}
+
+	// no remote, with local
+	local, _, _, err = store.loadManifest(signedBytes, dgst.String(), "")
+	if err != nil {
+		t.Fatalf("unexpected error verifying manifest without remote digest: %v", err)
+	}
+
+	if local != dgst {
+		t.Fatalf("local digest not correctly calculated: %v", err)
+	}
+
+	// bad remote, we fail the check.
+	local, _, _, err = store.loadManifest(signedBytes, dgst.String(), zeroDigest)
+	if err == nil {
+		t.Fatalf("error expected when verifying with differing remote digest")
 	}
 }

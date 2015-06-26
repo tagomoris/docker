@@ -1,83 +1,122 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
 
-	"github.com/docker/docker/engine"
-	"github.com/docker/docker/runconfig"
+	"github.com/docker/docker/api/types"
 )
 
-func (daemon *Daemon) ContainerInspect(job *engine.Job) error {
-	if len(job.Args) != 1 {
-		return fmt.Errorf("usage: %s NAME", job.Name)
-	}
-	name := job.Args[0]
+func (daemon *Daemon) ContainerInspect(name string) (*types.ContainerJSON, error) {
 	container, err := daemon.Get(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	container.Lock()
 	defer container.Unlock()
-	if job.GetenvBool("raw") {
-		b, err := json.Marshal(&struct {
-			*Container
-			HostConfig *runconfig.HostConfig
-		}{container, container.hostConfig})
-		if err != nil {
-			return err
-		}
-		job.Stdout.Write(b)
-		return nil
+
+	base, err := daemon.getInspectData(container)
+	if err != nil {
+		return nil, err
 	}
 
-	out := &engine.Env{}
-	out.SetJson("Id", container.ID)
-	out.SetAuto("Created", container.Created)
-	out.SetJson("Path", container.Path)
-	out.SetList("Args", container.Args)
-	out.SetJson("Config", container.Config)
-	out.SetJson("State", container.State)
-	out.Set("Image", container.ImageID)
-	out.SetJson("NetworkSettings", container.NetworkSettings)
-	out.Set("ResolvConfPath", container.ResolvConfPath)
-	out.Set("HostnamePath", container.HostnamePath)
-	out.Set("HostsPath", container.HostsPath)
-	out.Set("LogPath", container.LogPath)
-	out.SetJson("Name", container.Name)
-	out.SetInt("RestartCount", container.RestartCount)
-	out.Set("Driver", container.Driver)
-	out.Set("ExecDriver", container.ExecDriver)
-	out.Set("MountLabel", container.MountLabel)
-	out.Set("ProcessLabel", container.ProcessLabel)
-	out.SetJson("Volumes", container.Volumes)
-	out.SetJson("VolumesRW", container.VolumesRW)
-	out.SetJson("AppArmorProfile", container.AppArmorProfile)
+	return &types.ContainerJSON{base, container.Config}, nil
+}
 
-	out.SetList("ExecIDs", container.GetExecIDs())
+func (daemon *Daemon) ContainerInspectRaw(name string) (*types.ContainerJSONRaw, error) {
+	container, err := daemon.Get(name)
+	if err != nil {
+		return nil, err
+	}
+
+	container.Lock()
+	defer container.Unlock()
+
+	base, err := daemon.getInspectData(container)
+	if err != nil {
+		return nil, err
+	}
+
+	config := &types.ContainerConfig{
+		container.Config,
+		container.hostConfig.Memory,
+		container.hostConfig.MemorySwap,
+		container.hostConfig.CpuShares,
+		container.hostConfig.CpusetCpus,
+	}
+
+	return &types.ContainerJSONRaw{base, config}, nil
+}
+
+func (daemon *Daemon) getInspectData(container *Container) (*types.ContainerJSONBase, error) {
+	// make a copy to play with
+	hostConfig := *container.hostConfig
 
 	if children, err := daemon.Children(container.Name); err == nil {
 		for linkAlias, child := range children {
-			container.hostConfig.Links = append(container.hostConfig.Links, fmt.Sprintf("%s:%s", child.Name, linkAlias))
+			hostConfig.Links = append(hostConfig.Links, fmt.Sprintf("%s:%s", child.Name, linkAlias))
 		}
 	}
 	// we need this trick to preserve empty log driver, so
 	// container will use daemon defaults even if daemon change them
-	if container.hostConfig.LogConfig.Type == "" {
-		container.hostConfig.LogConfig = daemon.defaultLogConfig
-		defer func() {
-			container.hostConfig.LogConfig = runconfig.LogConfig{}
-		}()
+	if hostConfig.LogConfig.Type == "" {
+		hostConfig.LogConfig = daemon.defaultLogConfig
 	}
 
-	out.SetJson("HostConfig", container.hostConfig)
-
-	container.hostConfig.Links = nil
-	if _, err := out.WriteTo(job.Stdout); err != nil {
-		return err
+	containerState := &types.ContainerState{
+		Running:    container.State.Running,
+		Paused:     container.State.Paused,
+		Restarting: container.State.Restarting,
+		OOMKilled:  container.State.OOMKilled,
+		Dead:       container.State.Dead,
+		Pid:        container.State.Pid,
+		ExitCode:   container.State.ExitCode,
+		Error:      container.State.Error,
+		StartedAt:  container.State.StartedAt,
+		FinishedAt: container.State.FinishedAt,
 	}
-	return nil
+
+	volumes := make(map[string]string)
+	volumesRW := make(map[string]bool)
+
+	for _, m := range container.MountPoints {
+		volumes[m.Destination] = m.Path()
+		volumesRW[m.Destination] = m.RW
+	}
+
+	contJSONBase := &types.ContainerJSONBase{
+		Id:              container.ID,
+		Created:         container.Created,
+		Path:            container.Path,
+		Args:            container.Args,
+		State:           containerState,
+		Image:           container.ImageID,
+		NetworkSettings: container.NetworkSettings,
+		ResolvConfPath:  container.ResolvConfPath,
+		HostnamePath:    container.HostnamePath,
+		HostsPath:       container.HostsPath,
+		LogPath:         container.LogPath,
+		Name:            container.Name,
+		RestartCount:    container.RestartCount,
+		Driver:          container.Driver,
+		ExecDriver:      container.ExecDriver,
+		MountLabel:      container.MountLabel,
+		ProcessLabel:    container.ProcessLabel,
+		Volumes:         volumes,
+		VolumesRW:       volumesRW,
+		AppArmorProfile: container.AppArmorProfile,
+		ExecIDs:         container.GetExecIDs(),
+		HostConfig:      &hostConfig,
+	}
+
+	contJSONBase.GraphDriver.Name = container.Driver
+	graphDriverData, err := daemon.driver.GetMetadata(container.ID)
+	if err != nil {
+		return nil, err
+	}
+	contJSONBase.GraphDriver.Data = graphDriverData
+
+	return contJSONBase, nil
 }
 
 func (daemon *Daemon) ContainerExecInspect(id string) (*execConfig, error) {

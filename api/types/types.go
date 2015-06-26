@@ -1,6 +1,12 @@
 package types
 
-import "github.com/docker/docker/pkg/version"
+import (
+	"time"
+
+	"github.com/docker/docker/daemon/network"
+	"github.com/docker/docker/pkg/version"
+	"github.com/docker/docker/runconfig"
+)
 
 // ContainerCreateResponse contains the information returned to a client on the
 // creation of a new container.
@@ -16,9 +22,6 @@ type ContainerCreateResponse struct {
 type ContainerExecCreateResponse struct {
 	// ID is the exec ID.
 	ID string `json:"Id"`
-
-	// Warnings are any warnings encountered during the execution of the command.
-	Warnings []string `json:"Warnings"`
 }
 
 // POST /auth
@@ -72,34 +75,51 @@ type Image struct {
 	Labels      map[string]string
 }
 
-type LegacyImage struct {
-	ID          string `json:"Id"`
-	Repository  string
-	Tag         string
-	Created     int
-	Size        int
-	VirtualSize int
+type GraphDriverData struct {
+	Name string
+	Data map[string]string
+}
+
+// GET "/images/{name:.*}/json"
+type ImageInspect struct {
+	Id              string
+	Parent          string
+	Comment         string
+	Created         time.Time
+	Container       string
+	ContainerConfig *runconfig.Config
+	DockerVersion   string
+	Author          string
+	Config          *runconfig.Config
+	Architecture    string
+	Os              string
+	Size            int64
+	VirtualSize     int64
+	GraphDriver     GraphDriverData
 }
 
 // GET  "/containers/json"
 type Port struct {
-	IP          string
+	IP          string `json:",omitempty"`
 	PrivatePort int
-	PublicPort  int
+	PublicPort  int `json:",omitempty"`
 	Type        string
 }
 
 type Container struct {
-	ID         string            `json:"Id"`
-	Names      []string          `json:",omitempty"`
-	Image      string            `json:",omitempty"`
-	Command    string            `json:",omitempty"`
-	Created    int               `json:",omitempty"`
-	Ports      []Port            `json:",omitempty"`
-	SizeRw     int               `json:",omitempty"`
-	SizeRootFs int               `json:",omitempty"`
-	Labels     map[string]string `json:",omitempty"`
-	Status     string            `json:",omitempty"`
+	ID         string `json:"Id"`
+	Names      []string
+	Image      string
+	Command    string
+	Created    int
+	Ports      []Port
+	SizeRw     int `json:",omitempty"`
+	SizeRootFs int `json:",omitempty"`
+	Labels     map[string]string
+	Status     string
+	HostConfig struct {
+		NetworkMode string `json:",omitempty"`
+	}
 }
 
 // POST "/containers/"+containerID+"/copy"
@@ -121,4 +141,115 @@ type Version struct {
 	Os            string
 	Arch          string
 	KernelVersion string `json:",omitempty"`
+	Experimental  bool   `json:",omitempty"`
+	BuildTime     string `json:",omitempty"`
+}
+
+// GET "/info"
+type Info struct {
+	ID                 string
+	Containers         int
+	Images             int
+	Driver             string
+	DriverStatus       [][2]string
+	MemoryLimit        bool
+	SwapLimit          bool
+	CpuCfsPeriod       bool
+	CpuCfsQuota        bool
+	IPv4Forwarding     bool
+	BridgeNfIptables   bool
+	BridgeNfIp6tables  bool
+	Debug              bool
+	NFd                int
+	OomKillDisable     bool
+	NGoroutines        int
+	SystemTime         string
+	ExecutionDriver    string
+	LoggingDriver      string
+	NEventsListener    int
+	KernelVersion      string
+	OperatingSystem    string
+	IndexServerAddress string
+	RegistryConfig     interface{}
+	InitSha1           string
+	InitPath           string
+	NCPU               int
+	MemTotal           int64
+	DockerRootDir      string
+	HttpProxy          string
+	HttpsProxy         string
+	NoProxy            string
+	Name               string
+	Labels             []string
+	ExperimentalBuild  bool
+}
+
+// This struct is a temp struct used by execStart
+// Config fields is part of ExecConfig in runconfig package
+type ExecStartCheck struct {
+	// ExecStart will first check if it's detached
+	Detach bool
+	// Check if there's a tty
+	Tty bool
+}
+
+type ContainerState struct {
+	Running    bool
+	Paused     bool
+	Restarting bool
+	OOMKilled  bool
+	Dead       bool
+	Pid        int
+	ExitCode   int
+	Error      string
+	StartedAt  time.Time
+	FinishedAt time.Time
+}
+
+// GET "/containers/{name:.*}/json"
+type ContainerJSONBase struct {
+	Id              string
+	Created         time.Time
+	Path            string
+	Args            []string
+	State           *ContainerState
+	Image           string
+	NetworkSettings *network.Settings
+	ResolvConfPath  string
+	HostnamePath    string
+	HostsPath       string
+	LogPath         string
+	Name            string
+	RestartCount    int
+	Driver          string
+	ExecDriver      string
+	MountLabel      string
+	ProcessLabel    string
+	Volumes         map[string]string
+	VolumesRW       map[string]bool
+	AppArmorProfile string
+	ExecIDs         []string
+	HostConfig      *runconfig.HostConfig
+	GraphDriver     GraphDriverData
+}
+
+type ContainerJSON struct {
+	*ContainerJSONBase
+	Config *runconfig.Config
+}
+
+// backcompatibility struct along with ContainerConfig
+type ContainerJSONRaw struct {
+	*ContainerJSONBase
+	Config *ContainerConfig
+}
+
+type ContainerConfig struct {
+	*runconfig.Config
+
+	// backward compatibility, they now live in HostConfig
+	Memory     int64
+	MemorySwap int64
+	CpuShares  int64
+	Cpuset     string
 }

@@ -1,10 +1,10 @@
-Source: docker-core
+Source: docker-engine
 Maintainer: Docker <support@docker.com>
-Homepage: https://dockerproject.com
+Homepage: https://dockerproject.org
 Vcs-Browser: https://github.com/docker/docker
 Vcs-Git: git://github.com/docker/docker.git
 
-Package: docker-core
+Package: docker-engine
 Architecture: linux-any
 Depends: iptables, ${misc:Depends}, ${perl:Depends}, ${shlibs:Depends}
 Recommends: aufs-tools,
@@ -19,7 +19,6 @@ Description: Docker: the open-source application container engine
  lightweight container
  .
  Docker containers are both hardware-agnostic and platform-agnostic. This means
- they can run anywhere, from your laptop to the largest EC2 compute instance and
  they can run anywhere, from your laptop to the largest EC2 compute instance and
  everything in between - and they don't require you to use a particular
  language, framework or packaging system. That makes them great building blocks

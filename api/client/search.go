@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/registry"
 )
 
+// ByStars sorts search results in ascending order by number of stars.
 type ByStars []registry.SearchResult
 
 func (r ByStars) Len() int           { return len(r) }
@@ -24,7 +25,7 @@ func (r ByStars) Less(i, j int) bool { return r[i].StarCount < r[j].StarCount }
 //
 // Usage: docker search [OPTIONS] TERM
 func (cli *DockerCli) CmdSearch(args ...string) error {
-	cmd := cli.Subcmd("search", "TERM", "Search the Docker Hub for images", true)
+	cmd := cli.Subcmd("search", []string{"TERM"}, "Search the Docker Hub for images", true)
 	noTrunc := cmd.Bool([]string{"#notrunc", "-no-trunc"}, false, "Don't truncate output")
 	trusted := cmd.Bool([]string{"#t", "#trusted", "#-trusted"}, false, "Only show trusted builds")
 	automated := cmd.Bool([]string{"-automated"}, false, "Only show automated builds")
@@ -44,16 +45,13 @@ func (cli *DockerCli) CmdSearch(args ...string) error {
 		return err
 	}
 
-	cli.LoadConfigFile()
-
 	rdr, _, err := cli.clientRequestAttemptLogin("GET", "/images/search?"+v.Encode(), nil, nil, repoInfo.Index, "search")
 	if err != nil {
 		return err
 	}
 
 	results := ByStars{}
-	err = json.NewDecoder(rdr).Decode(&results)
-	if err != nil {
+	if err := json.NewDecoder(rdr).Decode(&results); err != nil {
 		return err
 	}
 

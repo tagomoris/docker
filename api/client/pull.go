@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/docker/docker/graph"
+	"github.com/docker/docker/graph/tags"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/registry"
@@ -15,7 +15,7 @@ import (
 //
 // Usage: docker pull [OPTIONS] IMAGENAME[:TAG|@DIGEST]
 func (cli *DockerCli) CmdPull(args ...string) error {
-	cmd := cli.Subcmd("pull", "NAME[:TAG|@DIGEST]", "Pull an image or a repository from the registry", true)
+	cmd := cli.Subcmd("pull", []string{"NAME[:TAG|@DIGEST]"}, "Pull an image or a repository from the registry", true)
 	allTags := cmd.Bool([]string{"a", "-all-tags"}, false, "Download all tagged images in the repository")
 	cmd.Require(flag.Exact, 1)
 
@@ -28,7 +28,7 @@ func (cli *DockerCli) CmdPull(args ...string) error {
 	)
 	taglessRemote, tag := parsers.ParseRepositoryTag(remote)
 	if tag == "" && !*allTags {
-		newRemote = utils.ImageReference(taglessRemote, graph.DEFAULTTAG)
+		newRemote = utils.ImageReference(taglessRemote, tags.DEFAULTTAG)
 	}
 	if tag != "" && *allTags {
 		return fmt.Errorf("tag can't be used with --all-tags/-a")
@@ -41,8 +41,6 @@ func (cli *DockerCli) CmdPull(args ...string) error {
 	if err != nil {
 		return err
 	}
-
-	cli.LoadConfigFile()
 
 	_, _, err = cli.clientRequestAttemptLogin("POST", "/images/create?"+v.Encode(), nil, cli.out, repoInfo.Index, "pull")
 	return err

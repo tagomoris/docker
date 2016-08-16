@@ -50,8 +50,10 @@ RUN apt-get update && apt-get install -y \
 	python-pip \
 	python-websocket \
 	reprepro \
-	ruby1.9.1 \
-	ruby1.9.1-dev \
+	# ruby1.9.1 \
+	# ruby1.9.1-dev \
+	ruby2.0 \
+	ruby2.0-dev \
 	s3cmd=1.1.0* \
 	ubuntu-zfs \
 	libzfs-dev \
@@ -118,7 +120,7 @@ RUN git clone https://github.com/golang/tools.git /go/src/golang.org/x/tools \
 	&& go install -v golang.org/x/tools/cmd/vet
 
 # TODO replace FPM with some very minimal debhelper stuff
-RUN gem install --no-rdoc --no-ri fpm --version 1.3.2
+RUN gem2.0 install --no-rdoc --no-ri fpm --version 1.3.2
 
 # Install registry
 ENV REGISTRY_COMMIT d957768537c5af40e4f4cd96871f7b2bde9e2923
